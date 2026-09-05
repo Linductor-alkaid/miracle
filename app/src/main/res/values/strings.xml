@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Miracle</string>
+    <string name="agent_notification_channel">Agent 会话</string>
+    <string name="agent_notification_title">Miracle 正在采集屏幕</string>
+    <string name="agent_notification_text">屏幕内容将被处理（P1 自检会话）</string>
 </resources>

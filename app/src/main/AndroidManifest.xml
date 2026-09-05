@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- P0 仅需网络声明（模型调用 P3 起）。截屏/无障碍/悬浮窗/前台服务权限随 P1-P3 增量加入。 -->
+    <!-- P0：网络（模型调用 P3 起）。 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- P1：媒体投影前台服务与常驻通知（同意体系，架构设计 §7）。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
@@ -19,6 +23,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".host.AgentForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 
 </manifest>
