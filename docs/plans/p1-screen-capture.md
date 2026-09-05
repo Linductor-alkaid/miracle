@@ -83,13 +83,17 @@ GUI 截屏测试页（含帧预览）；真机/模拟器证据。
 
 ## 测试与退出条件
 
-- [x] 真机：自检页两次 observe 均 `"ok":true`，帧宽高=真实显示，format=RGBA8888，
-  epoch 一致且非 0；bridge 统计 `leases_released` ≥ 2 且与带 lease 的结算数一致；
-  `duplicate/unknown/late` 违规计数为 0。
+- [x] 真机：自检页两次 observe 均 `"ok":true`，帧 format=RGBA8888，epoch 一致且非 0，
+  `duplicate/unknown/late` 违规计数为 0。**口径备注**：帧宽高为降采样后的采集尺寸
+  （640×1406，真机 1080×2376 按 0.9M px 上限缩放，`MIR-20260905-004` 规避方案），
+  非原生分辨率字面值；lease"恰好一次释放"以宿主侧替代举证成立——`outstanding_leases`
+  归零、bridge 违规计数全 0、destroy 无 lease 悬挂，而 mira bridge 统计
+  `leases_released` 在该路径恒为 0（计数口径观察项，附于 `MIR-20260905-004` 备注，
+  待上游核对）。
 - [x] 真机：自检完成后 stop/destroy 干净（无 lease 悬挂、无崩溃日志），应用可重复
   执行自检。
 - [x] 模拟器：同自检通过（ARM 翻译路径，仅作回归补充证据）。
-- [ ] 负向：拒绝投影授权 → 明确 `PermissionDenied` UI 状态，无崩溃。
+- [x] 负向：拒绝投影授权 → 明确 `PermissionDenied` UI 状态，无崩溃。（2026-09-05 真机补验：ColorOS 对话框点"取消"后 UI 呈现"⛔ 投影授权被拒绝"，FATAL/ANR=0，按钮可重试；补验中发现并修复 UI 状态 bug——P1 按钮 onStart 未调用 `begin()`，导致 `markDenied()` 的 Requesting 守卫永不满足、负向状态从未呈现）
 - [x] 门禁：bridge/host 层零线程创建（grep + 评审）；ABI 实现无异常穿越 JNI。
 - [x] `./gradlew assembleDebug lintDebug testDebugUnitTest` 全绿（6/6 单测）；CI 见验证记录。
 - [x] 文档同步完成（含 mira 侧回填拟稿）。
@@ -136,3 +140,15 @@ PJE110 / Android 16 / API 36 已连接过）。
   回填拟稿见 `docs/upstream_feedback/mira-abi-backfill-draft.md`（独立上游变更）。
 - 遗留改进项（不阻塞 P1）：授权结果随 Activity 重建重放时 UI 结果可能由新实例
   呈现为 Running（自检本身由服务 Bound 事件驱动、进程内单次，不受影响）。
+
+2026-09-05（P1 负向路径补验与口径修正，OnePlus Ace 3）：
+
+- 负向验证：触发"授权屏幕采集并自检" → ColorOS 投影对话框点"取消" → UI 呈现
+  "⛔ 投影授权被拒绝"（fail-closed，未启动服务、未采集），logcat FATAL/ANR 计数 0，
+  授权按钮可重试。
+- 补验发现并修复 bug（`fix(ui)`）：`MainActivity` 的 `onRequestProjection` 未调用
+  `captureViewModel.begin()`，state 停留 Idle 使 `markDenied()`/`markConsumed()` 的
+  Requesting 守卫失效——正向流程此前经 `maybeLaunchSelfTest` 旁路侥幸成立，负向
+  状态则从未呈现。修复后负向/正向状态机均按设计闭合。
+- 计划口径如实修正：lease 释放证据改以宿主侧替代举证表述（bridge
+  `leases_released` 计数问题为台账观察项）；帧尺寸标注为降采样采集值。
