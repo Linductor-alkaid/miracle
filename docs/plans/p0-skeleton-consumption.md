@@ -1,6 +1,6 @@
 # P0：骨架与消费验证
 
-> 状态：In Progress
+> 状态：Completed
 > 负责人：Miracle Maintainers
 > 所属计划：[Miracle 实施总计划](miracle-implementation-plan.md)
 > 前置：文档基线（DEC-001~003 已 Accepted）
@@ -65,7 +65,9 @@ Host ABI 实现（P1 起）、持久状态（P4）。
 
 - [x] `./gradlew assembleDebug` 成功，APK 含 `libmiracle_host.so`（arm64-v8a，1.76MB）。
 - [x] `./gradlew lintDebug testDebugUnitTest` 通过（3/3 单测通过，0 失败）。
-- [ ] CI（GitHub Actions）在 master push 上全绿，含 lock 校验。（待推送后回填）
+- [x] CI（GitHub Actions）在 master push 上全绿，含 lock 校验。（run `33964086721`
+  success，6m18s，commit `27653c4`；首跑 `33964056639` 因 runner 缺 cmdline-tools 失败，
+  修复后绿）
 - [x] 模拟器安装启动：自检页显示 baseline 各步骤成功与耗时（init 4ms / wait 6ms /
   Applied / Stopped），UI 文本渲染确认；force-stop 无 ANR/native 崩溃日志。
 - [x] bridge 源码无 `std::thread`/`std::async`/`pthread_create`（grep 门禁通过）。
@@ -113,4 +115,14 @@ Host ABI 实现（P1 起）、持久状态（P4）。
     `"ok":true`。负责人：Miracle Maintainers / 用户配合。真机通过后本条升级为 Runtime
     verified(device)，并回填 `docs/compatibility/oneplus-ace3.md`。
   - 模拟器证据基于 ARM 翻译执行 arm64 库（性能不代表性），不表述为真机性能。
-  - 首次 CI 结果待推送后回填（见退出条件第 3 条）。
+
+2026-09-05（CI 验证与里程碑收尾，commit `27653c4`+）：
+
+- CI：首跑 run `33964056639` 失败（ubuntu-latest 新镜像无 PATH 上的 `sdkmanager`，
+  `command not found`）；修复为绝对路径调用 + 缺失时从官方源安装 cmdline-tools 后，
+  run `33964086721` **success**（6m18s）：SDK 组件安装 → `install-mira.sh`（远程克隆
+  `Linductor-alkaid/mira` @ 钉死 commit，含 submodule 拉取）→ assembleDebug +
+  lintDebug + testDebugUnitTest 全绿 → APK 产物上传。
+- 由此，mira 安装链路在"本地克隆"与"CI 远程克隆"两条路径均有 Build verified 证据。
+- 里程碑退出条件全部满足（真机项按工程规范 §4 以补跑条件形式闭合）；状态置
+  `Completed`。真机 OnePlus Ace 3 冒烟仍待设备执行，属登记的补跑项，不阻塞 P0。
