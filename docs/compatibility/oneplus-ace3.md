@@ -38,3 +38,11 @@ adb logcat -s miracle/bridge
 
 - USB 调试授权流程正常（弹窗授权 + 始终允许）。
 - 后台管理对前台服务/无障碍的回收行为待 P1/P2 链路接入后验证（构建打包设计 §7）。
+
+## P1 记录（2026-09-05）
+
+- 授权路径：ColorOS 三步（确认 → 应用选择器 → 选择 Miracle 自身）；uiautomator
+  dump 会惊扰系统对话框，脚本化验证需用固定坐标盲点（详见 P1 计划验证记录）。
+- 环境自检：两帧 640×1406 RGBA8888（155.8ms/106.8ms），epoch=1，
+  `"ok":true`，shutdown Completed；UI 渲染含两帧预览；force-stop 干净退出。
+- 帧预算：受 `MIR-20260905-004` 约束，宿主降采样至 0.9M px。

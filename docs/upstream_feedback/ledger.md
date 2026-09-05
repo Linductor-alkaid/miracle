@@ -43,3 +43,20 @@
 - 影响：无真机时缺乏模拟器回归路径（Miracle `POST-02`）。
 - 期望语义：提供与 arm64 等价的 android-x86_64（或 universal）预设并进 CI。
 - 可验收结果：Miracle CI 可在 x86_64 模拟器上运行 instrumented 冒烟。
+
+### MIR-20260905-004：AndroidHostAdapter 内置 MemoryArtifactStore 容量不可配置
+
+- 状态：Open
+- 分级：P2（结构性：真机分辨率下闭环第二步即耗尽）
+- 证据：miracle 真机（PJE110）P1 自检：帧 852×1876 RGBA≈6.4MB，第二帧 observe
+  失败 `"artifact store capacity exhausted"`；`AndroidHostAdapter` 构造中硬编码
+  `MemoryArtifactStore artifacts_{8ULL * 1024 * 1024}`，公共 API 无容量参数或
+  store 注入点。
+- 影响：闭环每步 observe 至少一帧；8MB 上限使"多步任务"在主流分辨率下不可行，
+  宿主被迫降采样至 0.9M px（640×1406）规避。
+- 期望语义：`AndroidHostAdapter::create` 支持注入 artifact store 或声明容量
+  （含落盘后端选项）；能力快照同步声明帧预算。
+- 可验收结果：注入/容量参数存在时，真机两帧 6.4MB observe 连续成功。
+- 备注（观察项）：成功路径中 bridge 统计 `leases_released` 恒为 0，而宿主侧
+  release 被调用（outstanding 归零、destroy 无悬挂）；疑似 bridge 侧计数与
+  observe 尾部 `outcome.lease.release()` 路径脱节，请上游核对统计口径。

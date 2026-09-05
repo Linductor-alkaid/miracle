@@ -28,3 +28,26 @@
 - OnePlus Ace 3（PJE110，Android 16 / API 36 / ColorOS 16）真机冒烟：安装、启动自检
   `"ok":true`（init 0ms / wait 1ms）、终态 `Stopped`、干净退出——mira Android arm64
   首批真机运行证据（Runtime verified(device)）。
+
+## [未发布] P1
+
+### 新增
+
+- Host ABI v1 宿主实现（`host_abi_impl.cpp`）：生命周期、能力/拓扑查询、操作注册表
+  （exactly-once 竞争结算）、capture_frame 全路径（native 拥有 lease 内存）、协作
+  取消；ui_tree 与输入 fail-closed。
+- 截屏管线（Kotlin）：MediaProjection 授权 → `mediaProjection` 类型前台服务 →
+  VirtualDisplay + ImageReader(RGBA_8888) → 行紧凑拷贝；降采样 0.9M px（上游
+  artifact store 8MB 约束，`MIR-20260905-004`）；旋转/投影失效 epoch 递增。
+- 环境自检：Executor + `AndroidHostAdapter::create` + observe×2 + 干净关闭，
+  JSON 结果含两帧描述符与 bridge/host 统计；P1 自检页（授权引导、帧预览、
+  统计展示、降级状态）。
+- 上游回填拟稿：`docs/upstream_feedback/mira-abi-backfill-draft.md`。
+
+### 验证
+
+- 真机（OnePlus Ace 3）：两帧 640×1406 RGBA8888（155.8/106.8ms），`"ok":true`，
+  epoch 一致，无违规回调，干净退出（Runtime verified(device)）。
+- 模拟器（API 35 x86_64 + ARM 翻译）：两帧 636×1414，同样通过。
+- 集成修复三项宿主契约对齐（out 参数零初始化、out_operation 可空、deadline
+  换算），均未修改 mira 源码。

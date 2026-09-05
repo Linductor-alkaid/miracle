@@ -8,10 +8,9 @@
 
 ## 1. 当前状态
 
-`In Progress`。文档基线（架构/工具集/前端/构建四设计 + DEC-001~003 + 工程规范）已建立；
-**P0 已完成**（2026-09-05：本地构建/单测/lint 全绿、模拟器与 OnePlus Ace 3 真机自检均通过
-（真机 PJE110 / Android 16 / API 36，Runtime verified(device)）、CI 绿 run `33964421737`）。
-下一里程碑 P1 未开始。
+`In Progress`。文档基线已建立；**P0、P1 已完成**（P1：真机与模拟器截屏链路全通，
+两帧 observe `"ok":true`、干净关闭，2026-09-05；上游缺口 `MIR-20260905-004` 登记）。
+下一里程碑 P2（输入链路）未开始。
 
 ## 2. 交付边界（SCOPE）
 
@@ -52,8 +51,8 @@
 
 | 里程碑 | 目标（能力增量） | 建议发布点 | 详细计划 |
 | --- | --- | --- | --- |
-| P0 | 骨架与消费验证：工程初始化、mira 安装链路、JNI 加载、Executor 生命周期、空 GUI/悬浮球 | —（内部基线） | `p0-skeleton-consumption.md`（待建） |
-| P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | `p1-screen-capture.md`（待建） |
+| P0 | 骨架与消费验证：工程初始化、mira 安装链路、JNI 加载、Executor 生命周期、空 GUI/悬浮球 | —（内部基线） | [p0-skeleton-consumption.md](p0-skeleton-consumption.md)（Completed） |
+| P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | [p1-screen-capture.md](p1-screen-capture.md)（Completed） |
 | P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | `p2-input-dispatch.md`（待建） |
 | P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | `p3-loop-mvp.md`（待建） |
 | P4 | 有状态：state_store 落盘、崩溃恢复、replay 检视 | v0.4.0 | `p4-stateful.md`（待建） |
