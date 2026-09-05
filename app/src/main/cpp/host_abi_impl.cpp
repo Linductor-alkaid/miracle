@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -112,7 +113,8 @@ bool call_request_frame(std::uint64_t correlation, std::uint64_t deadline_ns) {
     jclass bridge = miracle::bridge::host_bridge_class();
     if (env == nullptr || bridge == nullptr) {
         __android_log_print(ANDROID_LOG_WARN, "miracle/hostabi",
-                            "request_frame: jni unavailable (env=%p class=%p)", env, bridge);
+                            "request_frame: jni unavailable (env=%p class=%p)",
+                            static_cast<void *>(env), static_cast<void *>(bridge));
         return false;
     }
     jmethodID method = env->GetStaticMethodID(bridge, "requestFrame", "(JJ)Z");
@@ -144,6 +146,84 @@ int call_permission_state() {
         return 2; // unknown
     }
     jmethodID method = env->GetStaticMethodID(bridge, "permissionState", "()I");
+    if (method == nullptr) {
+        env->ExceptionClear();
+        return 2;
+    }
+    return static_cast<int>(env->CallStaticIntMethod(bridge, method));
+}
+
+// 输入受理：0=已受理（完成经 nativeCompleteInput 回流）1=无障碍未启用 2=受理失败。
+int call_dispatch_input(std::uint64_t correlation, std::int64_t deadline_ns,
+                        const std::string &events_json) {
+    miracle::bridge::AttachedEnv attach;
+    JNIEnv *env = attach.env();
+    jclass bridge = miracle::bridge::host_bridge_class();
+    if (env == nullptr || bridge == nullptr) {
+        __android_log_print(ANDROID_LOG_WARN, "miracle/hostabi",
+                            "dispatch_input: jni unavailable (env=%p class=%p)",
+                            static_cast<void *>(env), static_cast<void *>(bridge));
+        return 2;
+    }
+    jmethodID method = env->GetStaticMethodID(bridge, "dispatchInput", "(JJ[B)I");
+    if (method == nullptr) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        __android_log_print(ANDROID_LOG_WARN, "miracle/hostabi", "dispatchInput not found");
+        return 2;
+    }
+    const jsize length = static_cast<jsize>(events_json.size());
+    jbyteArray payload = env->NewByteArray(length);
+    if (payload == nullptr) {
+        env->ExceptionClear();
+        return 2;
+    }
+    env->SetByteArrayRegion(payload, 0, length,
+                            reinterpret_cast<const jbyte *>(events_json.data()));
+    const jint outcome =
+        env->CallStaticIntMethod(bridge, method, static_cast<jlong>(correlation),
+                                 static_cast<jlong>(deadline_ns), payload);
+    env->DeleteLocalRef(payload);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        __android_log_print(ANDROID_LOG_WARN, "miracle/hostabi",
+                            "dispatchInput threw for correlation %llu",
+                            static_cast<unsigned long long>(correlation));
+        return 2;
+    }
+    return outcome;
+}
+
+// 协作取消通知（fire-and-forget；结算由 Kotlin 完成路径回流）。
+void call_cancel_input(std::uint64_t correlation) {
+    miracle::bridge::AttachedEnv attach;
+    JNIEnv *env = attach.env();
+    jclass bridge = miracle::bridge::host_bridge_class();
+    if (env == nullptr || bridge == nullptr) {
+        return;
+    }
+    jmethodID method = env->GetStaticMethodID(bridge, "cancelInput", "(J)V");
+    if (method == nullptr) {
+        env->ExceptionClear();
+        return;
+    }
+    env->CallStaticVoidMethod(bridge, method, static_cast<jlong>(correlation));
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
+// 输入就绪状态：0=就绪 1=无障碍未启用 2=瞬态未就绪。
+int call_input_state() {
+    miracle::bridge::AttachedEnv attach;
+    JNIEnv *env = attach.env();
+    jclass bridge = miracle::bridge::host_bridge_class();
+    if (env == nullptr || bridge == nullptr) {
+        return 2;
+    }
+    jmethodID method = env->GetStaticMethodID(bridge, "inputState", "()I");
     if (method == nullptr) {
         env->ExceptionClear();
         return 2;
@@ -201,6 +281,97 @@ void deliver_status_result(const CallbackView &view, std::uint64_t correlation,
     result.kind = kind;
     result.environment_epoch = view.environment_epoch;
     view.on_complete(view.user_data, &result);
+}
+
+void deliver_input_result(const CallbackView &view, std::uint64_t correlation,
+                          MiraHostStatus status, std::uint32_t receipt,
+                          std::uint32_t side_effect) {
+    MiraHostOperationResultV1 result{};
+    result.struct_size = sizeof(result);
+    result.correlation = correlation;
+    result.host_generation = view.host_generation;
+    result.status = status;
+    result.kind = MIRA_HOST_OP_DISPATCH_INPUT;
+    result.input_receipt = receipt;
+    result.side_effect_may_have_occurred = side_effect;
+    result.environment_epoch = view.environment_epoch;
+    view.on_complete(view.user_data, &result);
+}
+
+// JSON 字符串字面量转义（控制字符与引号；非 ASCII 以原始 UTF-8 字节透传，
+// 整体经 jbyteArray 送往 Kotlin 按 UTF-8 解码，不经 NewStringUTF）。
+void append_json_escaped(std::string &out, const char *text, std::uint32_t length) {
+    static const char *kHex = "0123456789abcdef";
+    for (std::uint32_t i = 0; i < length; ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        switch (c) {
+        case '"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                out += "\\u00";
+                out += kHex[(c >> 4) & 0xF];
+                out += kHex[c & 0xF];
+            } else {
+                out += static_cast<char>(c);
+            }
+        }
+    }
+}
+
+// 输入请求 → Kotlin 事件 JSON：[{"k":1,"x":..,"y":..,"x2":..,"y2":..,"d":..,"t":..}]。
+// 调用前已通过 ABI 校验；缓冲尺寸有界（64 事件 × 文本 ≤4096B）。
+std::string build_input_events_json(const MiraHostInputRequestV1 *request) {
+    std::string json;
+    json.reserve(64 + request->event_count * 96);
+    json += "[";
+    char number[64];
+    for (std::uint32_t i = 0; i < request->event_count; ++i) {
+        const MiraHostInputEventV1 &event = request->events[i];
+        if (i != 0) {
+            json += ",";
+        }
+        json += "{\"k\":";
+        std::snprintf(number, sizeof(number), "%u", event.kind);
+        json += number;
+        std::snprintf(number, sizeof(number), ",\"x\":%.17g", event.x);
+        json += number;
+        std::snprintf(number, sizeof(number), ",\"y\":%.17g", event.y);
+        json += number;
+        std::snprintf(number, sizeof(number), ",\"x2\":%.17g", event.x2);
+        json += number;
+        std::snprintf(number, sizeof(number), ",\"y2\":%.17g", event.y2);
+        json += number;
+        std::snprintf(number, sizeof(number), ",\"d\":%u", event.duration_ms);
+        json += number;
+        if (event.text != nullptr && event.text_length > 0) {
+            json += ",\"t\":\"";
+            append_json_escaped(json, event.text, event.text_length);
+            json += "\"";
+        }
+        json += "}";
+    }
+    json += "]";
+    return json;
 }
 
 // 竞争结算：从注册表取走 correlation 的所有权。true = 本调用负责终态回调。
@@ -275,6 +446,7 @@ MiraHostStatus mira_android_host_stop_v1(MiraAndroidHostV1 *host) {
     }
     CallbackView view;
     std::vector<std::pair<std::uint64_t, std::uint32_t>> cancelled;
+    std::vector<std::uint64_t> input_ops;
     {
         std::lock_guard lock(host->mutex);
         if (host->lifecycle == 3) {
@@ -282,10 +454,13 @@ MiraHostStatus mira_android_host_stop_v1(MiraAndroidHostV1 *host) {
         }
         host->lifecycle = 2;
         for (const auto &entry : host->ops) {
-            cancelled.emplace_back(entry.first, entry.second.kind);
+            if (entry.second.kind == MIRA_HOST_OP_DISPATCH_INPUT) {
+                input_ops.emplace_back(entry.first);
+            } else {
+                cancelled.emplace_back(entry.first, entry.second.kind);
+            }
         }
-        host->ops.clear();
-        host->cancelled_ops += cancelled.size();
+        host->cancelled_ops += cancelled.size() + input_ops.size();
         if (!cancelled.empty()) {
             view = host->callback_view();
         }
@@ -293,6 +468,35 @@ MiraHostStatus mira_android_host_stop_v1(MiraAndroidHostV1 *host) {
     for (const auto &entry : cancelled) {
         deliver_status_result(view, entry.first, entry.second, MIRA_HOST_ERR_CANCELLED);
     }
+    // 输入操作协作取消：通知 Kotlin（手势取消是异步的），有界等待完成回流。
+    for (const std::uint64_t correlation : input_ops) {
+        call_cancel_input(correlation);
+    }
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        {
+            std::lock_guard lock(host->mutex);
+            if (host->ops.empty()) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    {
+        // 排空后残留（Kotlin 未在界内回流）：强制结算 CANCELLED；迟到的 Kotlin
+        // 完成将计入 unknown_completions（有界、可见）。
+        std::lock_guard lock(host->mutex);
+        if (!host->ops.empty()) {
+            view = host->callback_view();
+            for (const auto &entry : host->ops) {
+                cancelled.emplace_back(entry.first, entry.second.kind);
+            }
+            host->ops.clear();
+        }
+    }
+    for (const auto &entry : cancelled) {
+        deliver_status_result(view, entry.first, entry.second, MIRA_HOST_ERR_CANCELLED);
+    }
+    // 输入完成回流依赖 g_active_host 定位宿主：解除登记延后排空之后。
     {
         std::lock_guard active_lock(g_active_mutex);
         if (g_active_host == host) {
@@ -334,6 +538,7 @@ MiraHostStatus mira_android_host_get_capabilities_v1(MiraAndroidHostV1 *host,
         return MIRA_HOST_ERR_INVALID_ARGUMENT;
     }
     const int permission = call_permission_state();
+    const int input_state = call_input_state(); // 0=就绪 1=无障碍未启用 2=瞬态
     const std::string topology = call_topology_json();
     double cap_w = 0;
     double cap_h = 0;
@@ -350,9 +555,11 @@ MiraHostStatus mira_android_host_get_capabilities_v1(MiraAndroidHostV1 *host,
     caps.max_frame_height = static_cast<std::uint32_t>(cap_h);
     caps.accessibility_completeness = 0;
     caps.supported_node_actions_mask = 0;
-    caps.input_capabilities_mask = 0;
-    caps.max_gesture_duration_ms = 0;
-    caps.max_pointers = 0;
+    // 输入能力位（bits 1..7 = tap/long_press/swipe/type/back/home/release_all）：
+    // 仅在无障碍服务连接且派发器就绪时声明，断开即 0（能力诚实，决策 2）。
+    caps.input_capabilities_mask = input_state == 0 ? 0x7FU : 0U;
+    caps.max_gesture_duration_ms = input_state == 0 ? 60'000U : 0U; // 平台 stroke 上限
+    caps.max_pointers = input_state == 0 ? 1U : 0U;                  // v1 单指
     caps.callback_thread_model = 0; // 宿主内部线程
     caps.lifecycle_state = host->lifecycle <= 2 ? static_cast<std::uint32_t>(host->lifecycle) : 2;
     caps.permission_state = static_cast<std::uint32_t>(permission);
@@ -474,11 +681,89 @@ MiraHostStatus mira_android_host_get_ui_tree_v1(MiraAndroidHostV1 *host,
 MiraHostStatus mira_android_host_dispatch_input_v1(MiraAndroidHostV1 *host,
                                                    const MiraHostInputRequestV1 *request,
                                                    std::uint64_t *out_operation) {
-    // P1 fail-closed：输入链路 P2 交付。快速失败，不回调。
-    (void)host;
-    (void)request;
-    (void)out_operation;
-    return MIRA_HOST_ERR_UNAVAILABLE;
+    if (host == nullptr || request == nullptr) {
+        return MIRA_HOST_ERR_INVALID_ARGUMENT;
+    }
+    if (request->struct_size < sizeof(MiraHostInputRequestV1)) {
+        return MIRA_HOST_ERR_INVALID_ARGUMENT;
+    }
+    if (request->display_id != 0) {
+        return MIRA_HOST_ERR_INVALID_ARGUMENT; // 单显示宿主
+    }
+    if (request->event_count == 0 || request->event_count > MIRA_MAX_INPUT_EVENTS) {
+        return MIRA_HOST_ERR_INVALID_ARGUMENT;
+    }
+    // 逐事件校验（快速失败：同步返回，不回调，与契约一致）。
+    for (std::uint32_t i = 0; i < request->event_count; ++i) {
+        const MiraHostInputEventV1 &event = request->events[i];
+        if (event.duration_ms > 60'000) {
+            return MIRA_HOST_ERR_INVALID_ARGUMENT;
+        }
+        const bool pair_ok = std::isfinite(event.x) && std::isfinite(event.y) &&
+                             event.x >= 0.0 && event.x <= 1.0 && event.y >= 0.0 &&
+                             event.y <= 1.0;
+        const bool quad_ok =
+            pair_ok && std::isfinite(event.x2) && std::isfinite(event.y2) &&
+            event.x2 >= 0.0 && event.x2 <= 1.0 && event.y2 >= 0.0 && event.y2 <= 1.0;
+        switch (event.kind) {
+        case MIRA_HOST_INPUT_TAP:
+        case MIRA_HOST_INPUT_LONG_PRESS:
+            if (!pair_ok) {
+                return MIRA_HOST_ERR_INVALID_ARGUMENT;
+            }
+            break;
+        case MIRA_HOST_INPUT_SWIPE:
+            if (!quad_ok) {
+                return MIRA_HOST_ERR_INVALID_ARGUMENT;
+            }
+            break;
+        case MIRA_HOST_INPUT_TYPE:
+            if (event.text == nullptr || event.text_length == 0 ||
+                event.text_length > 4096) {
+                return MIRA_HOST_ERR_INVALID_ARGUMENT;
+            }
+            break;
+        case MIRA_HOST_INPUT_BACK:
+        case MIRA_HOST_INPUT_HOME:
+        case MIRA_HOST_INPUT_RELEASE_ALL:
+            break;
+        default:
+            return MIRA_HOST_ERR_INVALID_ARGUMENT;
+        }
+    }
+    {
+        std::lock_guard lock(host->mutex);
+        if (host->lifecycle != 1) {
+            return MIRA_HOST_ERR_INVALID_STATE;
+        }
+        host->ops[request->correlation] = PendingOp{MIRA_HOST_OP_DISPATCH_INPUT};
+    }
+    if (out_operation != nullptr) {
+        *out_operation = request->correlation;
+    }
+    // deadline 换算（内部约定）：0=无超时；负值=已过期；正值=剩余时长（ns）。
+    std::int64_t deadline = 0;
+    if (request->deadline_ns > 0) {
+        const std::uint64_t now_ns = static_cast<std::uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        deadline = request->deadline_ns > now_ns
+                       ? static_cast<std::int64_t>(request->deadline_ns - now_ns)
+                       : -1;
+    }
+    const std::string events_json = build_input_events_json(request);
+    const int accepted = call_dispatch_input(request->correlation, deadline, events_json);
+    if (accepted != 0) {
+        // 快速失败路径：竞争结算，赢家负责恰好一次终态回调。
+        CallbackView view;
+        if (claim_pending(host, request->correlation, view)) {
+            const MiraHostStatus status = accepted == 1
+                                              ? MIRA_HOST_ERR_PERMISSION_DENIED
+                                              : MIRA_HOST_ERR_UNAVAILABLE;
+            deliver_input_result(view, request->correlation, status,
+                                 MIRA_HOST_INPUT_RECEIPT_UNKNOWN, 0);
+        }
+    }
+    return MIRA_HOST_OK;
 }
 
 MiraHostStatus mira_android_host_cancel_operation_v1(MiraAndroidHostV1 *host,
@@ -487,20 +772,31 @@ MiraHostStatus mira_android_host_cancel_operation_v1(MiraAndroidHostV1 *host,
         return MIRA_HOST_ERR_INVALID_ARGUMENT;
     }
     std::uint32_t kind = 0;
-    bool claimed = false;
+    bool sync_settle = false;
+    bool async_input = false;
     CallbackView view;
     {
         std::lock_guard lock(host->mutex);
         const auto found = host->ops.find(operation);
         if (found != host->ops.end()) {
             kind = found->second.kind;
-            host->ops.erase(found);
             host->cancelled_ops += 1;
-            claimed = true;
-            view = host->callback_view();
+            if (kind == MIRA_HOST_OP_DISPATCH_INPUT) {
+                // 输入取消是协作式：操作留在注册表，由 Kotlin 完成路径结算
+                // （未提交平台→CANCELLED；已提交被中断→EXECUTION_UNCERTAIN+
+                // side_effect=1；竞态下先完成→原结果）。不在此处投递终态。
+                async_input = true;
+            } else {
+                host->ops.erase(found);
+                sync_settle = true;
+                view = host->callback_view();
+            }
         }
     }
-    if (claimed) {
+    if (async_input) {
+        call_cancel_input(operation); // 解除锁后通知，避免回调进锁
+    }
+    if (sync_settle) {
         deliver_status_result(view, operation, kind, MIRA_HOST_ERR_CANCELLED);
     }
     return MIRA_HOST_OK; // 已结算或未知的取消是成功 no-op
@@ -537,6 +833,10 @@ void miracle_host_notify_epoch_changed() {
         }
         host->environment_epoch += 1;
         host->host_sequence += 1;
+        __android_log_print(ANDROID_LOG_INFO, "miracle/hostabi",
+                            "epoch changed -> %llu (host_sequence=%llu)",
+                            static_cast<unsigned long long>(host->environment_epoch),
+                            static_cast<unsigned long long>(host->host_sequence));
         if (host->callbacks.on_capabilities_changed == nullptr) {
             return;
         }
@@ -646,5 +946,37 @@ extern "C" MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation,
     result.capture_end_ns = end_ns;
     result.environment_epoch = epoch;
     view.on_complete(view.user_data, &result);
+    return MIRA_HOST_OK;
+}
+
+// 输入完成：Kotlin 携带 (status, receipt, side_effect)。由 HostBridge.nativeCompleteInput
+// （见 runtime_glue.cpp）在主线程调用。生命周期==2（stop 排空中）仍接受——输入取消
+// 的结算按设计经此路径回流；已结算/未知的完成计数并丢弃。
+extern "C" MiraHostStatus miracle_host_complete_input(std::uint64_t correlation,
+                                                      MiraHostStatus status,
+                                                      std::uint32_t receipt,
+                                                      std::uint32_t side_effect) {
+    MiraAndroidHostV1 *host = nullptr;
+    {
+        std::lock_guard active_lock(g_active_mutex);
+        host = g_active_host;
+    }
+    if (host == nullptr) {
+        return MIRA_HOST_ERR_INVALID_STATE;
+    }
+    {
+        std::lock_guard lock(host->mutex);
+        if (host->lifecycle != 1 && host->lifecycle != 2) {
+            host->late_completions += 1;
+            return MIRA_HOST_ERR_INVALID_STATE;
+        }
+    }
+    CallbackView view;
+    if (!claim_pending(host, correlation, view)) {
+        std::lock_guard lock(host->mutex);
+        host->unknown_completions += 1;
+        return MIRA_HOST_ERR_INVALID_STATE;
+    }
+    deliver_input_result(view, correlation, status, receipt, side_effect);
     return MIRA_HOST_OK;
 }

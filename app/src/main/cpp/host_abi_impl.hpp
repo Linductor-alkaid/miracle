@@ -15,6 +15,12 @@ MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation, bool ok,
                                            std::uint64_t size, std::uint64_t begin_ns,
                                            std::uint64_t end_ns, MiraHostStatus error_status);
 
+// 输入完成（HostBridge.nativeCompleteInput 经 runtime_glue 调入）。
+// receipt 为 MiraHostInputReceipt；side_effect 非 0 即 side_effect_may_have_occurred。
+MiraHostStatus miracle_host_complete_input(std::uint64_t correlation, MiraHostStatus status,
+                                           std::uint32_t receipt,
+                                           std::uint32_t side_effect);
+
 // epoch 递增并触发能力变化回调（旋转/投影重建时由 Kotlin 调入）。
 void miracle_host_notify_epoch_changed();
 

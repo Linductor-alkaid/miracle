@@ -1,10 +1,14 @@
-// Miracle JNI bridge：P0 自检入口 + P1 环境自检入口。
+// Miracle JNI bridge：P0 自检入口 + P1 环境自检入口 + P2 输入链路自检入口。
 //
 // 职责（见 docs/design/system_architecture_design.md §2/§4）：
 //  - runtimeSelfTest()：mira RuntimeBaseline 完整生命周期自检（P0）。
 //  - environmentSelfTest()：Executor + AndroidHostAdapter + observe×2 全链路自检（P1）。
-//  - nativeCompleteFrame()：Kotlin 帧完成 → host_abi_impl 结算（exactly-once 竞争在
-//    注册表侧闭合）。
+//  - nativeCompleteFrame()/nativeCompleteInput()：Kotlin 完成 → host_abi_impl 结算
+//    （exactly-once 竞争在注册表侧闭合）。
+//  - inputContractProbe()：直接 ABI 契约探针（独立 host：非法参数/过期 deadline/
+//    RELEASE_ALL/长按中途取消/取消后复验；阻塞等待仅存在于本测试入口）。
+//  - inputTestOpen/Dispatch/Interrupt/Close()：经 mira adapter 的输入会话
+//    （InputSequence → execute() 全链路）。
 //  - 显式 RegisterNatives（JNI_OnLoad），异常绝不穿越 JNI。
 //  - 本文件不创建任何线程；mira Executor 由本层唯一持有并按 DEC-001 §17.2 顺序关闭。
 #include "host_abi_impl.hpp"
@@ -23,9 +27,14 @@
 #include <jni.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -303,6 +312,422 @@ std::string run_environment_self_test() {
     return summary;
 }
 
+// ---- P2 输入链路自检（直接 ABI 契约探针 + adapter 会话） ----
+
+const char *host_status_name(MiraHostStatus status) {
+    switch (status) {
+    case MIRA_HOST_OK:
+        return "OK";
+    case MIRA_HOST_ERR_INVALID_ARGUMENT:
+        return "INVALID_ARGUMENT";
+    case MIRA_HOST_ERR_UNAVAILABLE:
+        return "UNAVAILABLE";
+    case MIRA_HOST_ERR_PERMISSION_DENIED:
+        return "PERMISSION_DENIED";
+    case MIRA_HOST_ERR_CANCELLED:
+        return "CANCELLED";
+    case MIRA_HOST_ERR_DEADLINE_EXCEEDED:
+        return "DEADLINE_EXCEEDED";
+    case MIRA_HOST_ERR_INVALID_STATE:
+        return "INVALID_STATE";
+    case MIRA_HOST_ERR_EXECUTION_UNCERTAIN:
+        return "EXECUTION_UNCERTAIN";
+    case MIRA_HOST_ERR_CAPACITY:
+        return "CAPACITY";
+    case MIRA_HOST_ERR_PLATFORM_ERROR:
+        return "PLATFORM_ERROR";
+    default:
+        return "OTHER";
+    }
+}
+
+const char *input_receipt_name(std::uint32_t receipt) {
+    switch (receipt) {
+    case MIRA_HOST_INPUT_RECEIPT_DISPATCHED:
+        return "DISPATCHED";
+    case MIRA_HOST_INPUT_RECEIPT_COMPLETED:
+        return "COMPLETED";
+    case MIRA_HOST_INPUT_RECEIPT_REJECTED:
+        return "REJECTED";
+    case MIRA_HOST_INPUT_RECEIPT_UNKNOWN:
+        return "UNKNOWN";
+    default:
+        return "NONE";
+    }
+}
+
+const char *execution_status_name(mira::ExecutionStatus status) {
+    switch (status) {
+    case mira::ExecutionStatus::Dispatched:
+        return "Dispatched";
+    case mira::ExecutionStatus::Completed:
+        return "Completed";
+    case mira::ExecutionStatus::Rejected:
+        return "Rejected";
+    case mira::ExecutionStatus::Unknown:
+        return "Unknown";
+    }
+    return "Other";
+}
+
+// 探针完成等待：宿主回调（主线程）做有界拷贝并通知；等待方为调用线程（测试专用，
+// 有界超时；生产取消路径事件驱动、无阻塞）。
+struct ProbeWaiter final {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::uint64_t expected = 0;
+    bool settled = false;
+    std::uint64_t duplicates = 0;
+    MiraHostOperationResultV1 result{};
+};
+
+void probe_on_operation_complete(void *user_data, const MiraHostOperationResultV1 *result) {
+    auto *waiter = static_cast<ProbeWaiter *>(user_data);
+    std::lock_guard lock(waiter->mutex);
+    if (waiter->settled || result->correlation != waiter->expected) {
+        waiter->duplicates += 1;
+        return;
+    }
+    waiter->result = *result;
+    waiter->settled = true;
+    waiter->cv.notify_all();
+}
+
+bool probe_wait(ProbeWaiter &waiter, std::uint64_t correlation, int timeout_ms) {
+    std::unique_lock lock(waiter.mutex);
+    waiter.expected = correlation;
+    waiter.settled = false;
+    return waiter.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                              [&] { return waiter.settled; });
+}
+
+MiraHostInputRequestV1 probe_request(std::uint64_t correlation, std::uint32_t kind, double x,
+                                     double y, double x2, double y2, std::uint32_t duration_ms,
+                                     const char *text, std::int64_t deadline_ns) {
+    MiraHostInputRequestV1 request{};
+    request.struct_size = sizeof(request);
+    request.correlation = correlation;
+    request.display_id = 0;
+    request.event_count = 1;
+    request.events[0].kind = kind;
+    request.events[0].x = x;
+    request.events[0].y = y;
+    request.events[0].x2 = x2;
+    request.events[0].y2 = y2;
+    request.events[0].duration_ms = duration_ms;
+    request.events[0].text = text;
+    request.events[0].text_length =
+        text == nullptr ? 0 : static_cast<std::uint32_t>(std::strlen(text));
+    request.deadline_ns = deadline_ns > 0 ? static_cast<std::uint64_t>(deadline_ns) : 0;
+    return request;
+}
+
+std::int64_t steady_now_ns() {
+    return static_cast<std::int64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+std::string run_input_contract_probe(double tap_x, double tap_y) {
+    std::string steps_json;
+    bool all_ok = true;
+    auto append_step = [&](const char *name, bool ok, const char *detail, double ms) {
+        if (!steps_json.empty()) {
+            steps_json += ",";
+        }
+        char buffer[320];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"name\":\"%s\",\"ok\":%s,\"detail\":\"%.192s\",\"ms\":%.1f}", name,
+                      ok ? "true" : "false", detail, ms);
+        steps_json += buffer;
+        if (!ok) {
+            all_ok = false;
+        }
+    };
+    const auto input_ready = [] {
+        miracle::bridge::AttachedEnv attach;
+        JNIEnv *env = attach.env();
+        jclass bridge = miracle::bridge::host_bridge_class();
+        if (env == nullptr || bridge == nullptr) {
+            return 2;
+        }
+        jmethodID method = env->GetStaticMethodID(bridge, "inputState", "()I");
+        if (method == nullptr) {
+            env->ExceptionClear();
+            return 2;
+        }
+        return static_cast<int>(env->CallStaticIntMethod(bridge, method));
+    };
+
+    const int ready = input_ready();
+    if (ready != 0) {
+        char error[160];
+        std::snprintf(error, sizeof(error), "input state=%d (accessibility)", ready);
+        std::string json;
+        miracle_host_debug_stats_json(json);
+        char summary[512];
+        std::snprintf(summary, sizeof(summary),
+                      "{\"ok\":false,\"stage\":\"accessibility\",\"error\":\"%.128s\","
+                      "\"steps\":[],\"probe\":{\"duplicates\":0,\"unknowns\":0},"
+                      "\"host\":%s,\"stop\":\"skipped\",\"destroy\":\"skipped\"}",
+                      error, json.c_str());
+        return summary;
+    }
+
+    ProbeWaiter waiter;
+    MiraAndroidHostConfigV1 config{};
+    config.struct_size = sizeof(config);
+    config.abi_version = MIRA_ANDROID_ABI_VERSION;
+    MiraHostCallbacksV1 callbacks{};
+    callbacks.struct_size = sizeof(callbacks);
+    callbacks.user_data = &waiter;
+    callbacks.on_operation_complete = &probe_on_operation_complete;
+    MiraAndroidHostV1 *host = nullptr;
+    MiraHostStatus status = mira_android_host_create_v1(&config, &callbacks, &host);
+    if (status != MIRA_HOST_OK || host == nullptr) {
+        char summary[256];
+        std::snprintf(summary, sizeof(summary),
+                      "{\"ok\":false,\"stage\":\"host_create\",\"error\":\"%s\"}",
+                      host_status_name(status));
+        return summary;
+    }
+    status = mira_android_host_start_v1(host);
+    if (status != MIRA_HOST_OK) {
+        // 进程内单 host 约束：其他自检会话占用中。
+        char summary[256];
+        std::snprintf(summary, sizeof(summary),
+                      "{\"ok\":false,\"stage\":\"host_start\",\"error\":\"%s\"}",
+                      host_status_name(status));
+        (void)mira_android_host_destroy_v1(host);
+        return summary;
+    }
+
+    auto dispatch_and_wait = [&](std::uint64_t correlation, MiraHostInputRequestV1 &request,
+                                 int wait_ms) -> std::pair<bool, MiraHostStatus> {
+        const MiraHostStatus submitted = mira_android_host_dispatch_input_v1(host, &request, nullptr);
+        if (submitted != MIRA_HOST_OK) {
+            return {false, submitted};
+        }
+        if (!probe_wait(waiter, correlation, wait_ms)) {
+            return {false, MIRA_HOST_ERR_DEADLINE_EXCEEDED};
+        }
+        return {true, waiter.result.status};
+    };
+
+    // 1. 非法坐标：同步快速失败（不回调）。
+    {
+        MiraHostInputRequestV1 request =
+            probe_request(101, MIRA_HOST_INPUT_TAP, 1.5, 0.5, 0, 0, 0, nullptr, 0);
+        request.deadline_ns = 0;
+        const MiraHostStatus submitted =
+            mira_android_host_dispatch_input_v1(host, &request, nullptr);
+        const bool ok = submitted == MIRA_HOST_ERR_INVALID_ARGUMENT;
+        append_step("invalid_coords", ok,
+                    ok ? "sync INVALID_ARGUMENT" : host_status_name(submitted), 0.0);
+    }
+
+    // 2. 过期 deadline：受理后按 DEADLINE_EXCEEDED 结算（不触碰平台）。
+    {
+        MiraHostInputRequestV1 request =
+            probe_request(102, MIRA_HOST_INPUT_LONG_PRESS, 0.5, 0.5, 0, 0, 600, nullptr, 0);
+        request.deadline_ns = static_cast<std::uint64_t>(steady_now_ns() - 1'000'000'000LL);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto outcome = dispatch_and_wait(102, request, 3000);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        const bool ok = outcome.first && outcome.second == MIRA_HOST_ERR_DEADLINE_EXCEEDED &&
+                        waiter.result.side_effect_may_have_occurred == 0;
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "status=%s side=%u",
+                      host_status_name(outcome.second), waiter.result.side_effect_may_have_occurred);
+        append_step("expired_deadline", ok, detail, ms);
+    }
+
+    // 3. RELEASE_ALL：安全原语随时可发，预期快速完成。
+    {
+        MiraHostInputRequestV1 request =
+            probe_request(103, MIRA_HOST_INPUT_RELEASE_ALL, 0, 0, 0, 0, 0, nullptr, 0);
+        request.deadline_ns = static_cast<std::uint64_t>(steady_now_ns() + 3'000'000'000LL);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto outcome = dispatch_and_wait(103, request, 3000);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        const bool ok = outcome.first && outcome.second == MIRA_HOST_OK &&
+                        waiter.result.input_receipt == MIRA_HOST_INPUT_RECEIPT_COMPLETED;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "status=%s receipt=%s", host_status_name(outcome.second),
+                      input_receipt_name(waiter.result.input_receipt));
+        append_step("release_all", ok, detail, ms);
+    }
+
+    // 4. 长按中途取消：手势在途时 cancel → EXECUTION_UNCERTAIN + side_effect=1。
+    {
+        MiraHostInputRequestV1 request =
+            probe_request(104, MIRA_HOST_INPUT_LONG_PRESS, 0.5, 0.5, 0, 0, 3000, nullptr, 0);
+        request.deadline_ns = static_cast<std::uint64_t>(steady_now_ns() + 8'000'000'000LL);
+        const auto t0 = std::chrono::steady_clock::now();
+        const MiraHostStatus submitted =
+            mira_android_host_dispatch_input_v1(host, &request, nullptr);
+        bool ok = false;
+        char detail[192];
+        if (submitted == MIRA_HOST_OK) {
+            // 有界等待手势进入平台（测试专用 sleep；生产路径无阻塞）。
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            const MiraHostStatus cancelled = mira_android_host_cancel_operation_v1(host, 104);
+            const bool settled = probe_wait(waiter, 104, 4000);
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+            ok = cancelled == MIRA_HOST_OK && settled &&
+                 waiter.result.status == MIRA_HOST_ERR_EXECUTION_UNCERTAIN &&
+                 waiter.result.side_effect_may_have_occurred == 1;
+            std::snprintf(detail, sizeof(detail), "cancel=%s settled=%s status=%s side=%u",
+                          host_status_name(cancelled), settled ? "true" : "false",
+                          host_status_name(waiter.result.status),
+                          waiter.result.side_effect_may_have_occurred);
+            append_step("cancel_midflight", ok, detail, ms);
+        } else {
+            std::snprintf(detail, sizeof(detail), "submit=%s", host_status_name(submitted));
+            append_step("cancel_midflight", false, detail, 0.0);
+        }
+    }
+
+    // 5. 取消后复验 tap：证明输入管线未滞死（无粘滞触点）。
+    {
+        MiraHostInputRequestV1 request =
+            probe_request(105, MIRA_HOST_INPUT_TAP, tap_x, tap_y, 0, 0, 0, nullptr, 0);
+        request.deadline_ns = static_cast<std::uint64_t>(steady_now_ns() + 5'000'000'000LL);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto outcome = dispatch_and_wait(105, request, 5000);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+        const bool ok = outcome.first && outcome.second == MIRA_HOST_OK &&
+                        waiter.result.input_receipt == MIRA_HOST_INPUT_RECEIPT_COMPLETED;
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "status=%s receipt=%s",
+                      host_status_name(outcome.second),
+                      input_receipt_name(waiter.result.input_receipt));
+        append_step("tap_after_cancel", ok, detail, ms);
+    }
+
+    const MiraHostStatus stop_status = mira_android_host_stop_v1(host);
+    const MiraHostStatus destroy_status = stop_status == MIRA_HOST_OK
+                                              ? mira_android_host_destroy_v1(host)
+                                              : MIRA_HOST_ERR_INVALID_STATE;
+    if (stop_status != MIRA_HOST_OK) {
+        // stop 失败（有 lease/操作悬挂）时不得 destroy；泄漏交由进程回收并如实上报。
+        append_step("stop", false, host_status_name(stop_status), 0.0);
+    }
+    if (stop_status == MIRA_HOST_OK && destroy_status != MIRA_HOST_OK) {
+        append_step("destroy", false, host_status_name(destroy_status), 0.0);
+    }
+
+    std::string host_stats;
+    miracle_host_debug_stats_json(host_stats);
+    char summary[1024];
+    std::snprintf(summary, sizeof(summary),
+                  "{\"ok\":%s,\"stage\":\"%s\",\"error\":\"\","
+                  "\"steps\":[%s],"
+                  "\"probe\":{\"duplicates\":%llu,\"unknowns\":0},"
+                  "\"host\":%s,\"stop\":\"%s\",\"destroy\":\"%s\"}",
+                  all_ok ? "true" : "false", all_ok ? "complete" : "probe", steps_json.c_str(),
+                  static_cast<unsigned long long>(waiter.duplicates), host_stats.c_str(),
+                  host_status_name(stop_status), host_status_name(destroy_status));
+    return summary;
+}
+
+// ---- adapter 会话（InputSequence → AndroidHostAdapter.execute() 全链路） ----
+
+struct InputTestSession final {
+    executor::Executor executor;
+    std::unique_ptr<mira::adapters::android::AndroidHostAdapter> adapter;
+};
+
+std::mutex g_input_test_mutex;
+std::unique_ptr<InputTestSession> g_input_test_session;
+
+std::string run_input_test_dispatch(std::int32_t kind, double x, double y, double x2, double y2,
+                                    const std::string &text, std::int32_t duration_ms,
+                                    std::int32_t timeout_ms) {
+    // mira InputSequence 不携带时长（payload 仅坐标/文本）；duration_ms 保留在 JNI
+    // 签名中以兼容探针复用，经 adapter 路径的手势使用宿主默认时长。
+    (void)duration_ms;
+    InputTestSession *session = nullptr;
+    {
+        std::lock_guard lock(g_input_test_mutex);
+        session = g_input_test_session.get();
+    }
+    if (session == nullptr) {
+        return "{\"ok\":false,\"error\":\"session not open\"}";
+    }
+    const char *kind_name = "unknown";
+    std::string payload;
+    char number[128];
+    switch (kind) {
+    case MIRA_HOST_INPUT_TAP:
+        kind_name = "tap";
+        std::snprintf(number, sizeof(number), "%.17g,%.17g", x, y);
+        payload = number;
+        break;
+    case MIRA_HOST_INPUT_LONG_PRESS:
+        kind_name = "long_press";
+        std::snprintf(number, sizeof(number), "%.17g,%.17g", x, y);
+        payload = number;
+        break;
+    case MIRA_HOST_INPUT_SWIPE:
+        kind_name = "swipe";
+        std::snprintf(number, sizeof(number), "%.17g,%.17g,%.17g,%.17g", x, y, x2, y2);
+        payload = number;
+        break;
+    case MIRA_HOST_INPUT_TYPE:
+        kind_name = "type";
+        payload = text;
+        break;
+    case MIRA_HOST_INPUT_BACK:
+        kind_name = "back";
+        break;
+    case MIRA_HOST_INPUT_HOME:
+        kind_name = "home";
+        break;
+    default:
+        return "{\"ok\":false,\"error\":\"unsupported kind for adapter path\"}";
+    }
+
+    mira::InputSequence sequence;
+    sequence.events.push_back(mira::InputEvent{kind_name, payload});
+    mira::OperationContext context;
+    context.operation = mira::OperationId::generate();
+    context.started_at = mira::Timestamp::now();
+    context.deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    auto receipt = session->adapter->execute(sequence, context);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    char summary[512];
+    if (!receipt.has_value()) {
+        const std::string message = receipt.error().safe_message;
+        std::snprintf(summary, sizeof(summary),
+                      "{\"ok\":false,\"kind\":\"%s\",\"error\":\"%.192s\",\"ms\":%.1f}",
+                      kind_name, message.c_str(), ms);
+        return summary;
+    }
+    const mira::ExecutionReceipt &value = receipt.value();
+    const bool completed = value.status == mira::ExecutionStatus::Completed;
+    std::snprintf(summary, sizeof(summary),
+                  "{\"ok\":%s,\"kind\":\"%s\",\"receipt\":\"%s\","
+                  "\"side_effect\":%s,\"epoch\":%llu,\"ms\":%.1f,\"error\":\"\"}",
+                  completed ? "true" : "false", kind_name,
+                  execution_status_name(value.status),
+                  value.side_effect_may_have_occurred ? "true" : "false",
+                  static_cast<unsigned long long>(value.environment_epoch), ms);
+    return summary;
+}
+
 // ---- JNI 导出 ----
 
 jstring JNICALL native_runtime_self_test(JNIEnv *env, jclass /*clazz*/) {
@@ -382,6 +807,153 @@ void JNICALL native_notify_epoch_changed(JNIEnv * /*env*/, jclass /*clazz*/) {
     miracle_host_notify_epoch_changed();
 }
 
+void JNICALL native_complete_input(JNIEnv * /*env*/, jclass /*clazz*/, jlong correlation,
+                                   jint status, jint receipt, jint side_effect) {
+    try {
+        const MiraHostStatus settled = miracle_host_complete_input(
+            static_cast<std::uint64_t>(correlation), static_cast<MiraHostStatus>(status),
+            static_cast<std::uint32_t>(receipt), static_cast<std::uint32_t>(side_effect));
+        if (settled != MIRA_HOST_OK) {
+            __android_log_print(
+                ANDROID_LOG_WARN, kLogTag,
+                "complete_input settled with status %d for correlation %lld",
+                static_cast<int>(settled), static_cast<long long>(correlation));
+        }
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                            "complete_input unexpected exception (correlation %lld)",
+                            static_cast<long long>(correlation));
+    }
+}
+
+jstring JNICALL native_input_contract_probe(JNIEnv *env, jclass /*clazz*/, jdouble tap_x,
+                                            jdouble tap_y) {
+    try {
+        const std::string payload = run_input_contract_probe(tap_x, tap_y);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag, "input probe: %s", payload.c_str());
+        return make_string(env, payload);
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "input probe exception: %s", error.what());
+        return make_string(env, "{\"ok\":false,\"stage\":\"exception\",\"error\":\"native\"}");
+    } catch (...) {
+        return make_string(env, "{\"ok\":false,\"stage\":\"exception\",\"error\":\"unknown\"}");
+    }
+}
+
+jint JNICALL native_input_test_open(JNIEnv * /*env*/, jclass /*clazz*/) {
+    try {
+        std::lock_guard lock(g_input_test_mutex);
+        if (g_input_test_session != nullptr) {
+            return -1; // 会话已打开
+        }
+        auto session = std::make_unique<InputTestSession>();
+        if (!session->executor.initialize(executor::ExecutorConfig{})) {
+            return -3;
+        }
+        auto created =
+            mira::adapters::android::AndroidHostAdapter::create(session->executor);
+        if (!created.has_value()) {
+            (void)session->executor.shutdown(true);
+            return -4;
+        }
+        session->adapter = std::move(created.value());
+        g_input_test_session = std::move(session);
+        return 1;
+    } catch (...) {
+        return -5;
+    }
+}
+
+jstring JNICALL native_input_test_dispatch(JNIEnv *env, jclass /*clazz*/, jint kind, jdouble x,
+                                           jdouble y, jdouble x2, jdouble y2, jstring text,
+                                           jint duration_ms, jint timeout_ms) {
+    try {
+        std::string text_value;
+        if (text != nullptr) {
+            const char *chars = env->GetStringUTFChars(text, nullptr);
+            if (chars == nullptr) {
+                return make_string(env, "{\"ok\":false,\"error\":\"text jni failed\"}");
+            }
+            text_value = chars;
+            env->ReleaseStringUTFChars(text, chars);
+        }
+        return make_string(
+            env, run_input_test_dispatch(kind, x, y, x2, y2, text_value, duration_ms,
+                                         timeout_ms <= 0 ? 8000 : timeout_ms));
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "input test dispatch exception: %s",
+                            error.what());
+        return make_string(env, "{\"ok\":false,\"error\":\"native exception\"}");
+    } catch (...) {
+        return make_string(env, "{\"ok\":false,\"error\":\"unknown native exception\"}");
+    }
+}
+
+jint JNICALL native_input_test_interrupt(JNIEnv * /*env*/, jclass /*clazz*/) {
+    try {
+        InputTestSession *session = nullptr;
+        {
+            std::lock_guard lock(g_input_test_mutex);
+            session = g_input_test_session.get();
+        }
+        if (session == nullptr) {
+            return -1;
+        }
+        mira::OperationContext context;
+        context.operation = mira::OperationId::generate();
+        context.started_at = mira::Timestamp::now();
+        (void)session->adapter->interrupt(context);
+        return 1;
+    } catch (...) {
+        return -2;
+    }
+}
+
+jstring JNICALL native_input_test_close(JNIEnv *env, jclass /*clazz*/) {
+    try {
+        std::unique_ptr<InputTestSession> session;
+        {
+            std::lock_guard lock(g_input_test_mutex);
+            session = std::move(g_input_test_session);
+            g_input_test_session = nullptr;
+        }
+        if (session == nullptr) {
+            return make_string(env, "{\"ok\":false,\"error\":\"session not open\"}");
+        }
+        const auto stats = session->adapter->bridge_stats();
+        session->adapter.reset();
+        const auto shutdown = session->executor.shutdown(true);
+        const bool shutdown_ok = shutdown == executor::ShutdownResult::Completed;
+        std::string host_stats;
+        miracle_host_debug_stats_json(host_stats);
+        char summary[640];
+        std::snprintf(summary, sizeof(summary),
+                      "{\"ok\":%s,"
+                      "\"bridge\":{\"submitted\":%llu,\"settled\":%llu,"
+                      "\"leases_released\":%llu,\"duplicates\":%llu,\"unknowns\":%llu,"
+                      "\"late\":%llu,\"rejections\":%llu,\"violations\":%llu},"
+                      "\"host\":%s,\"shutdown\":\"%s\"}",
+                      shutdown_ok ? "true" : "false",
+                      static_cast<unsigned long long>(stats.operations_submitted),
+                      static_cast<unsigned long long>(stats.operations_settled),
+                      static_cast<unsigned long long>(stats.leases_released),
+                      static_cast<unsigned long long>(stats.duplicate_terminal_callbacks),
+                      static_cast<unsigned long long>(stats.unknown_operation_callbacks),
+                      static_cast<unsigned long long>(stats.late_callbacks_after_detach),
+                      static_cast<unsigned long long>(stats.executor_submission_rejections),
+                      static_cast<unsigned long long>(stats.contract_violations),
+                      host_stats.c_str(),
+                      shutdown_ok ? "Completed" : "Incomplete");
+        return make_string(env, summary);
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "input test close exception: %s",
+                            error.what());
+        return make_string(env, "{\"ok\":false,\"error\":\"native exception\"}");
+    } catch (...) {
+        return make_string(env, "{\"ok\":false,\"error\":\"unknown native exception\"}");
+    }
+}
+
 const JNINativeMethod kNativeBridgeMethods[] = {
     {"runtimeSelfTest", "()Ljava/lang/String;",
      reinterpret_cast<void *>(&native_runtime_self_test)},
@@ -390,9 +962,18 @@ const JNINativeMethod kNativeBridgeMethods[] = {
 const JNINativeMethod kHostBridgeMethods[] = {
     {"nativeCompleteFrame", "(JIIII[BJJI)V",
      reinterpret_cast<void *>(&native_complete_frame)},
+    {"nativeCompleteInput", "(JIII)V", reinterpret_cast<void *>(&native_complete_input)},
     {"nativeNotifyEpochChanged", "()V", reinterpret_cast<void *>(&native_notify_epoch_changed)},
     {"environmentSelfTest", "()Ljava/lang/String;",
      reinterpret_cast<void *>(&native_environment_self_test)},
+    {"inputContractProbe", "(DD)Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_input_contract_probe)},
+    {"inputTestOpen", "()I", reinterpret_cast<void *>(&native_input_test_open)},
+    {"inputTestDispatch", "(IDDDDLjava/lang/String;II)Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_input_test_dispatch)},
+    {"inputTestInterrupt", "()I", reinterpret_cast<void *>(&native_input_test_interrupt)},
+    {"inputTestClose", "()Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_input_test_close)},
 };
 
 } // namespace
@@ -419,7 +1000,9 @@ jint JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "HostBridge class not found");
         return JNI_ERR;
     }
-    if (env->RegisterNatives(host_bridge, kHostBridgeMethods, 3) != JNI_OK) {
+    if (env->RegisterNatives(host_bridge, kHostBridgeMethods,
+                             sizeof(kHostBridgeMethods) / sizeof(kHostBridgeMethods[0])) !=
+        JNI_OK) {
         __android_log_print(ANDROID_LOG_ERROR, kLogTag, "HostBridge RegisterNatives failed");
         return JNI_ERR;
     }
