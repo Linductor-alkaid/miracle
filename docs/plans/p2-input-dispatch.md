@@ -67,7 +67,9 @@ P2 自检页（无障碍引导、靶点、文本框、BackHandler、结果与违
    像素（`maximumWindowMetrics`，API<30 走 `getRealMetrics`），clamp 屏内；旋转后
    旧坐标由 epoch 失效（见风险表：无投影时 epoch 源受限）。
 5. **文本注入**：`findFocus(FOCUS_INPUT)` + `ACTION_SET_TEXT`（需
-   `canRetrieveWindowContent`），无焦点节点时 500ms 内有界重试；失败报
+   `canRetrieveWindowContent`），无焦点节点时 2s 内有界重试（收尾修复：厂商
+   焦点语义曝光可超 500ms）；焦点落在容器节点（Compose 暴露差异）时在
+   **焦点子树内**有界 BFS（≤64 节点）解析可编辑节点；失败报
    `(OK, REJECTED, side=0)`。"逐键手势降级"因无软键盘布局知识不可行，登记为本里程碑
    已知限制（P3 证据化后决定是否推动上游）。
 6. **back/home**：`performGlobalAction`，布尔结果如实映射 COMPLETED/REJECTED。
@@ -129,7 +131,7 @@ P2 自检页（无障碍引导、靶点、文本框、BackHandler、结果与违
 | --- | --- |
 | ColorOS/EMUI 无障碍开关路径与手势限速（厂商反自动化） | 以真机实测为准；限速表现为耗时上升/回执如实；异常路径 fail-closed 并记录 |
 | 无投影会话中旋转不触发 epoch（P1 的 epoch 源在 capture provider） | P2 记录为已知限制；P3 SessionGate 统一 epoch 源；真机旋转矩阵用投影绑定会话验证 |
-| `ACTION_SET_TEXT` 对 Compose TextField 的焦点可见性时序 | 500ms 有界重试；失败 REJECTED 可见；真机断言文本内容 |
+| `ACTION_SET_TEXT` 对 Compose TextField 的焦点可见性时序 | 2s 有界重试 + 焦点子树可编辑节点解析（收尾修复实测两项根因）；失败 REJECTED 可见；真机断言文本内容 |
 | 长按取消后是否有"粘滞触点"（抬起未合成） | 取消探针后追加 tap 复验（副作用计数递增证明输入管线未滞死） |
 | mira adapter `execute()` 不传 duration（payload 仅坐标） | 宿主默认时长（决策 4）；需要显式时长的契约测试走直接 ABI 探针 |
 | 双自检入口并发触发"进程内单 host"冲突 | UI 互斥 + 探针/会话生命周期串行；冲突时 adapter create 失败路径可见 |
