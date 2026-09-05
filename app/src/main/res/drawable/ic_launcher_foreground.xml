@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮球轮廓图形作为启动图标前景（P3 前的占位视觉）。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#7FC4FF"
+        android:pathData="M54,30a15,15 0 1,0 0.001,0z" />
+    <path
+        android:fillColor="#3D82F4"
+        android:pathData="M54,66c-11,0 -20,6.5 -20,14.5v3.5h40v-3.5c0,-8 -9,-14.5 -20,-14.5z" />
+</vector>
