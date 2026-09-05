@@ -4,4 +4,7 @@
     <string name="agent_notification_channel">Agent 会话</string>
     <string name="agent_notification_title">Miracle 正在采集屏幕</string>
     <string name="agent_notification_text">屏幕内容将被处理（P1 自检会话）</string>
+    <string name="accessibility_service_label">Miracle 输入服务</string>
+    <string name="accessibility_service_summary">为自动化任务提供触控与文本注入</string>
+    <string name="accessibility_service_description">Miracle 使用无障碍手势能力代表你执行屏幕操作（点击、滑动、输入文本）。仅在明确的自动化会话中使用；可随时在系统设置中关闭。</string>
 </resources>
