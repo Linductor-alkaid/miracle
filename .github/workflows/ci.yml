@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  host-build:
+    name: host build (assemble + lint + unit test)
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install pinned Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
+            "ndk;26.3.11579264" "cmake;3.31.6" >/dev/null
+          # SDK cmake 自带 ninja，供 install-mira.sh 使用
+          echo "$ANDROID_HOME/cmake/3.31.6/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned mira (lock commit verified)
+        run: tools/install-mira.sh
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, lint and unit test
+        run: ./gradlew --no-daemon assembleDebug lintDebug testDebugUnitTest
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: miracle-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
