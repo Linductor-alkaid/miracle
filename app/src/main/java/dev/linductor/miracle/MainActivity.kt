@@ -61,7 +61,10 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MiracleApp(
                         modifier = Modifier.padding(innerPadding),
-                        onRequestProjection = { requestProjectionWithNotification() },
+                        onRequestProjection = {
+                            captureViewModel.begin()
+                            requestProjectionWithNotification()
+                        },
                     )
                 }
             }
