@@ -55,7 +55,10 @@ class InputDispatcher(
         private const val DEFAULT_LONG_PRESS_MS = 600L
         private const val DEFAULT_SWIPE_MS = 350L
         private const val MAX_DURATION_MS = 60_000L
-        private const val FOCUS_RETRY_MS = 500L
+        // 焦点语义曝光时序：tap 落点正确时 Compose 焦点到无障碍树的可见性在
+        // 部分厂商上可超 500ms（PJE110 实测失败样本 524ms 窗口耗尽），放宽到
+        // 2s 仍有界；无焦点时按 Rejected fail-closed，不猜测目标。
+        private const val FOCUS_RETRY_MS = 2_000L
         private const val FOCUS_RETRY_STEP_MS = 50L
         private const val NANOS_PER_MS = 1_000_000L
     }
@@ -390,22 +393,24 @@ class InputDispatcher(
             android.util.Log.w(TAG, "type: no active window root")
             return false
         }
-        val node = try {
+        val focused = try {
             root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         } catch (_: Exception) {
             null
-        } ?: run {
-            android.util.Log.w(TAG, "type: no input-focused node")
+        }
+        // 焦点可能在宿主/容器节点上（Compose 的 a11y 暴露差异：tap 聚焦内部
+        // 可编辑节点，程序化聚焦可能落在容器）——在焦点子树内有界查找可编辑
+        // 节点；不跨出焦点子树猜测目标（fail-closed）。
+        val node = focused?.let { resolveEditableTarget(it) }
+        if (node == null) {
+            android.util.Log.w(
+                TAG,
+                "type: no editable node under focus " +
+                    "(focused=${focused?.className ?: "none"})",
+            )
             return false
         }
         return try {
-            if (!node.isEditable) {
-                android.util.Log.w(
-                    TAG,
-                    "type: focused node not editable (class=${node.className})",
-                )
-                return false
-            }
             val arguments = Bundle()
             arguments.putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text,
@@ -418,6 +423,37 @@ class InputDispatcher(
         } catch (_: Exception) {
             false
         }
+    }
+
+    /** 焦点子树内的有界可编辑节点解析（BFS，≤64 节点，防深树失控）。 */
+    private fun resolveEditableTarget(focused: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (focused.isEditable) {
+            return focused
+        }
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(focused)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 64) {
+            val current = queue.removeFirst()
+            visited += 1
+            val count = try {
+                current.childCount
+            } catch (_: Exception) {
+                0
+            }
+            for (index in 0 until count) {
+                val child = try {
+                    current.getChild(index)
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                if (child.isEditable) {
+                    return child
+                }
+                queue.add(child)
+            }
+        }
+        return null
     }
 
     /** 手势合成：[0,1] 规范坐标 → 当前屏幕像素（每次重读几何，clamp 屏内）。 */

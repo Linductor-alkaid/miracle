@@ -220,3 +220,22 @@ P2 自检页（无障碍引导、靶点、文本框、BackHandler、结果与违
   P2 输入路径模拟器补跑条件：开启无障碍后运行输入自检，预期探针/套件同构
   通过）。home 后台导航兜底在生产自动化场景受后台启动限制（P3 悬浮窗
   SYSTEM_ALERT_WINDOW 权限后覆盖）。
+
+2026-09-06（P2 收尾修复：type 步骤在用户操作路径下 Rejected）：
+
+- 用户报告与复现：用户滚动位置/Done 后布局下 `会话·type ✗ Rejected`
+  （524ms＝重试窗口耗尽），与脚本化验证通过的固定滚动布局不同。
+- 根因两项（扩展诊断日志定位）：
+  1. 焦点语义曝光时序：tap 落点正确时 Compose 焦点到无障碍树的可见性在
+     部分厂商上可超 500ms；且滚动/布局变化使 tap(field) 落点偏移时焦点
+     完全不建立。
+  2. 程序化聚焦（FocusRequester）落在字段容器节点（class=android.view.View，
+     非可编辑）而非 tap 聚焦的内部可编辑节点——Compose 无障碍暴露差异。
+- 修复（生产语义不变，仍 fail-closed）：
+  1. `FOCUS_RETRY_MS` 500→2000ms（有界放宽；无焦点仍 Rejected，不猜测目标）；
+  2. `typeIntoFocusedNode` 在**焦点子树内**有界 BFS（≤64 节点）解析可编辑
+     节点——不跨出焦点子树（容器聚焦/焦点宿主暴露差异均覆盖）；
+  3. 自检页 type 步骤前经 FocusRequester 确定性聚焦（测试辅助，与 tap 落点
+     精度解耦；被测链路 ABI→InputDispatcher→SET_TEXT 不变）。
+- 复验（PJE110）：用户式单滚布局 ✅（type=Completed 526ms、零 type 告警）、
+  Done 后"再次自检"布局 ✅、两轮 home 均达 launcher 前台；门禁全绿（20/20）。

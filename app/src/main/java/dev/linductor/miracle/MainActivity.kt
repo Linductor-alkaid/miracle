@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -342,6 +343,18 @@ private fun InputCard(viewModel: InputViewModel) {
     // 差异（真机实测约 +77px）；经 LocalView 屏幕锚定换算为真实屏幕坐标。
     val composeView = androidx.compose.ui.platform.LocalView.current
     val screenAnchor = remember { IntArray(2) }
+    val fieldFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+    // type 步骤的确定性聚焦辅助（见 InputViewModel.requestFieldFocus 文档）。
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        viewModel.requestFieldFocus = {
+            // 未附着时 requestFocus 抛 IllegalStateException，由调用方捕获记录。
+            fieldFocusRequester.requestFocus()
+        }
+        onDispose {
+            viewModel.requestFieldFocus = null
+        }
+    }
 
     fun toNormalized(x: Float, y: Float): Pair<Double, Double> {
         composeView.getLocationOnScreen(screenAnchor)
@@ -430,6 +443,7 @@ private fun InputCard(viewModel: InputViewModel) {
                 onValueChange = viewModel::onTyped,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .focusRequester(fieldFocusRequester)
                     .onGloballyPositioned { coords ->
                         val center = coords.boundsInWindow().center
                         val (x, y) = toNormalized(center.x, center.y)

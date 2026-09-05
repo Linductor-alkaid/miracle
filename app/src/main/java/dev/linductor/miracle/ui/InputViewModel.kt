@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -83,6 +84,15 @@ class InputViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     var geometry: UiGeometry = UiGeometry()
         private set
+
+    /**
+     * 文本框确定性聚焦辅助（仅自检使用；由 InputCard 经 FocusRequester 注册，
+     * 主线程调用）。生产输入语义不变：type 仍按"焦点节点 SET_TEXT、无焦点
+     * fail-closed"执行——该辅助只保证被测链路（ABI→InputDispatcher→SET_TEXT）
+     * 的焦点前置条件成立，与 tap 落点精度解耦。
+     */
+    @Volatile
+    var requestFieldFocus: (() -> Unit)? = null
 
     private var running = false
 
@@ -195,6 +205,21 @@ class InputViewModel(application: Application) : AndroidViewModel(application) {
             for (step in sequence) {
                 // 每步重读几何：IME 弹出/重组导致的位移即时生效。
                 val coords = step.resolve(geometry)
+                if (step.kind == HostAbiInput.KIND_TYPE) {
+                    // 确定性聚焦辅助：tap(field) 的落点受滚动/布局影响，type 的
+                    // 被测对象是焦点节点 SET_TEXT 链路——焦点前置条件由此保证。
+                    withContext(Dispatchers.Main) {
+                        try {
+                            requestFieldFocus?.invoke()
+                        } catch (error: IllegalStateException) {
+                            android.util.Log.w(
+                                "miracle/input",
+                                "field focus assist unavailable: ${error.message}",
+                            )
+                        }
+                    }
+                    delay(150) // 等待焦点生效（主线程串行后通常即时）。
+                }
                 val json = HostBridge.inputTestDispatch(
                     step.kind, coords[0], coords[1], coords[2], coords[3],
                     step.text, 0, 10_000,
