@@ -152,3 +152,17 @@ PJE110 / Android 16 / API 36 已连接过）。
   状态则从未呈现。修复后负向/正向状态机均按设计闭合。
 - 计划口径如实修正：lease 释放证据改以宿主侧替代举证表述（bridge
   `leases_released` 计数问题为台账观察项）；帧尺寸标注为降采样采集值。
+
+2026-09-05（第二设备验证，Huawei ADA-AL00 / Android 12 / API 31 / EMUI 14.2）：
+
+- `POST-04` 触发后首台扩展设备，同一 APK 零改动直接验证：
+  - P0 baseline 自检 `"ok":true`；
+  - P1 环境自检两次运行均 `"ok":true`（两帧 630×1428，160.3/125.9ms 与
+    205.8/97.6ms），违规计数全 0，干净关闭；
+  - 交互授权路径（EMUI 单步"允许"对话框）与首跑均通过；
+  - force-stop 干净退出，无崩溃。
+- 观察项（详见 `docs/compatibility/huawei-ada-al00.md`）：首跑未观察到授权对话框
+  阻塞（机制待查，P2 前建议复现确认其与同意模型的关系）；EMUI 对话框布局与
+  ColorOS 不同，自动化脚本需按厂商定位。
+- 结论：印证"代码一份、验证多台"的设备策略；兼容性矩阵新增
+  `huai-ada-al00.md`（Huawei ADA-AL00，Runtime verified(device)）。

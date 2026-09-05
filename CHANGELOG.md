@@ -51,3 +51,9 @@
 - 模拟器（API 35 x86_64 + ARM 翻译）：两帧 636×1414，同样通过。
 - 集成修复三项宿主契约对齐（out 参数零初始化、out_operation 可空、deadline
   换算），均未修改 mira 源码。
+
+### 多设备（POST-04）
+
+- 新增受支持设备：Huawei ADA-AL00（Android 12 / API 31 / EMUI 14.2）——同一 APK
+  零改动，P0+P1 自检均通过（Runtime verified(device)）；观察项：首跑授权对话框
+  未阻塞（待查），EMUI 对话框布局与 ColorOS 不同。
