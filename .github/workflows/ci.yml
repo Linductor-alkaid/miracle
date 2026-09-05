@@ -22,8 +22,16 @@ jobs:
 
       - name: Install pinned Android SDK components
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install \
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "cmdline-tools missing on runner; provisioning"
+            curl -sSL -o /tmp/ct.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/ct.zip -d /tmp/ct
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            mv /tmp/ct/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
             "platform-tools" "platforms;android-35" "build-tools;35.0.0" \
             "ndk;26.3.11579264" "cmake;3.31.6" >/dev/null
           # SDK cmake 自带 ninja，供 install-mira.sh 使用
