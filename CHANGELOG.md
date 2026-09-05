@@ -25,4 +25,6 @@
   `"ok":true`，RuntimeBaseline 终态 `Stopped`，mira 0.1.0；干净退出无崩溃。
 - 集成备注：mira 安装包消费需 PIC 开关与 find-root 前缀注入
   （见 `docs/compatibility/mira-16e419e.md`）。
-- 待办：OnePlus Ace 3 真机冒烟（补跑条件见 P0 计划）。
+- OnePlus Ace 3（PJE110，Android 16 / API 36 / ColorOS 16）真机冒烟：安装、启动自检
+  `"ok":true`（init 0ms / wait 1ms）、终态 `Stopped`、干净退出——mira Android arm64
+  首批真机运行证据（Runtime verified(device)）。

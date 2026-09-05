@@ -71,7 +71,8 @@ Host ABI 实现（P1 起）、持久状态（P4）。
 - [x] 模拟器安装启动：自检页显示 baseline 各步骤成功与耗时（init 4ms / wait 6ms /
   Applied / Stopped），UI 文本渲染确认；force-stop 无 ANR/native 崩溃日志。
 - [x] bridge 源码无 `std::thread`/`std::async`/`pthread_create`（grep 门禁通过）。
-- [x] OnePlus Ace 3 真机启动证据补跑条件已登记（见验证记录 2026-09-05）。
+- [x] OnePlus Ace 3 真机启动证据已执行（2026-09-05，见验证记录与
+  `docs/compatibility/oneplus-ace3.md`：自检 `"ok":true`、终态 `Stopped`、干净退出）。
 - [x] 文档同步完成（验证记录 + 兼容性证据 + CHANGELOG + README）。
 
 ## 验证记录
@@ -124,5 +125,16 @@ Host ABI 实现（P1 起）、持久状态（P4）。
   `Linductor-alkaid/mira` @ 钉死 commit，含 submodule 拉取）→ assembleDebug +
   lintDebug + testDebugUnitTest 全绿 → APK 产物上传。
 - 由此，mira 安装链路在"本地克隆"与"CI 远程克隆"两条路径均有 Build verified 证据。
-- 里程碑退出条件全部满足（真机项按工程规范 §4 以补跑条件形式闭合）；状态置
-  `Completed`。真机 OnePlus Ace 3 冒烟仍待设备执行，属登记的补跑项，不阻塞 P0。
+- 里程碑退出条件全部满足；状态置 `Completed`。
+
+2026-09-05（真机补跑完成，PJE110 / Android 16 / API 36 / ColorOS V16.0.0）：
+
+- 用户连接 OnePlus Ace 3（USB 授权经 udev 规则 `51-android-oneplus.rules` 修复后完成）。
+- `adb install -r app-debug.apk` Success；启动后 logcat
+  `self test: {"ok":true,...,"init_ms":0,"wait_ms":1,"result_code":"Applied",
+  "final_state":"Stopped","mira_version":"0.1.0"}`；
+  UI dump 确认"自检通过 / 0.1.0 / Stopped"渲染；force-stop 无 FATAL/ANR。
+- 证据等级升级：**Runtime verified(device)**，详录于
+  `docs/compatibility/oneplus-ace3.md`。此前登记的"真机补跑条件"条目就此闭合。
+- 附带发现：设备实际固件为 API 36（高于构建基线 compileSdk/targetSdk 35），安装、
+  启动与自检向前兼容正常。
