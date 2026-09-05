@@ -2,15 +2,17 @@
 
 > 状态：Active
 > 版本：1.0
-> 更新日期：2026-09-05
+> 更新日期：2026-09-06
 > 前置分析：[可行性与方案分析](../feasibility-and-solution.md)
 > 规范：[项目管理与工程规范](../project/project-standards.md)
 
 ## 1. 当前状态
 
-`In Progress`。文档基线已建立；**P0、P1 已完成**（P1：真机与模拟器截屏链路全通，
-两帧 observe `"ok":true`、干净关闭，2026-09-05；上游缺口 `MIR-20260905-004` 登记）。
-下一里程碑 P2（输入链路）未开始。
+`In Progress`。文档基线已建立；**P0、P1、P2 已完成**（P2：输入链路全通——
+dispatchGesture 全集经 mira adapter 与直接 ABI 探针双轨验证，协作取消按原子语义
+`EXECUTION_UNCERTAIN+side=1` 结算，输入安全矩阵（负向/超时/取消/home/旋转）真机
+取证，2026-09-06；上游缺口 `MIR-20260906-005` 登记）。
+下一里程碑 P3（闭环 MVP）未开始。
 
 ## 2. 交付边界（SCOPE）
 
@@ -53,7 +55,7 @@
 | --- | --- | --- | --- |
 | P0 | 骨架与消费验证：工程初始化、mira 安装链路、JNI 加载、Executor 生命周期、空 GUI/悬浮球 | —（内部基线） | [p0-skeleton-consumption.md](p0-skeleton-consumption.md)（Completed） |
 | P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | [p1-screen-capture.md](p1-screen-capture.md)（Completed） |
-| P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | `p2-input-dispatch.md`（待建） |
+| P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | [p2-input-dispatch.md](p2-input-dispatch.md)（Completed） |
 | P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | `p3-loop-mvp.md`（待建） |
 | P4 | 有状态：state_store 落盘、崩溃恢复、replay 检视 | v0.4.0 | `p4-stateful.md`（待建） |
 | P5 | 验证报告与上游回流 | v0.5.0（评估报告） | `p5-validation-report.md`（待建） |

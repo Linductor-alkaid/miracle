@@ -29,7 +29,7 @@ P3 后的可选增量，接口在本设计中预留但不实现。
 | Provider | 操作 | 实现要点 |
 | --- | --- | --- |
 | `ScreenCaptureProvider` | `requestFrame(display, deadline)` | MediaProjection → VirtualDisplay + ImageReader(RGBA_8888)；帧到达即包装为 lease（ByteBuffer 指针 + release 闭 Image）；旋转/重建递增 epoch；黑帧检测标志 |
-| `InputDispatcher` | `dispatch(events, deadline)` | 手势：`GestureDescription` + `dispatchGesture`（stroke 路径、时长、连续手势 willContinue 备用）；文本：优先无障碍文本动作，失败降级逐键手势；取消：`cancelGesture` + `RELEASE_ALL` 语义（合成抬起事件）；回执如实区分 Dispatched/Completed/Rejected/Unknown |
+| `InputDispatcher` | `dispatch(events, deadline)` | 手势：`GestureDescription` + `dispatchGesture`（stroke 路径、时长；连续手势 willContinue 备用）；文本：优先无障碍文本动作（焦点节点 `ACTION_SET_TEXT`），失败 fail-closed（逐键手势需软键盘布局知识，P2 已知限制）；取消：公共 API 无手势中断能力（API 35 实测），按原子输入语义——未提交→`CANCELLED`，已提交→自然收敛后 `EXECUTION_UNCERTAIN+side=1`；RELEASE_ALL 在序列粒度阻断未派发事件（"合成抬起"需非公共 API，已知限制）；回执如实区分 Dispatched/Completed/Rejected/Unknown |
 | `AppMonitor` | 前台应用/包名事件流 | 无障碍 `TYPE_WINDOW_STATE_CHANGED` 过滤；供 Verify 与 UI 显示，不进决策（v1） |
 | `UiTreeProvider` | `requestTree(display, maxBytes)` | **预留**：无障碍节点树序列化；mira adapter v1 不采纳（见 §7 台账），仅做技术验证用 |
 

@@ -46,3 +46,23 @@ adb logcat -s miracle/bridge
 - 环境自检：两帧 640×1406 RGBA8888（155.8ms/106.8ms），epoch=1，
   `"ok":true`，shutdown Completed；UI 渲染含两帧预览；force-stop 干净退出。
 - 帧预算：受 `MIR-20260905-004` 约束，宿主降采样至 0.9M px。
+
+## P2 记录（2026-09-06）
+
+- 输入链路（无障碍 dispatchGesture）：探针与 adapter 会话双轨全绿（详见
+  `docs/plans/p2-input-dispatch.md` 验证记录）；证据等级 Runtime verified(device)。
+- **ColorOS 拦截无障碍源 HOME**：`performGlobalAction(GLOBAL_ACTION_HOME)` 返回
+  true 但前台不变（55 次 0.4s 间隔采样恒为本应用）；宿主实现追加
+  CATEGORY_HOME intent 兜底——本应用前台会话可达 launcher
+  （com.android.launcher），后台自动化场景受后台启动限制（P3 悬浮窗
+  SYSTEM_ALERT_WINDOW 后覆盖）。back 无此拦截。
+- **坐标空间**：Compose `boundsInWindow` 与屏幕原点存在约 77px 偏差（480dpi、
+  edge-to-edge enforced 下实测）；宿主经 `LocalView.getLocationOnScreen` 锚定
+  修正后落点精确。无障碍手势坐标空间与视觉空间一致。
+- **无障碍服务生命周期**：`adb install -r` 与 `am force-stop` 会清除
+  `enabled_accessibility_services`（系统行为，脚本化验证需每次重启用）；服务
+  绑定存在偶发 teardown/重连窗口（~1.2s），能力位随之抖动（epoch 递增路径）。
+- **uiautomator 对 Compose 返回陈旧语义树**：dump 文本与实时 UI 不一致
+  （位置与文字均可能陈旧）；本机取证改用截图像素读取 + logcat JSON。
+- 旋转：`user_rotation` 强制旋转下 epoch 正常递增（投影绑定会话）；旋转瞬间
+  在途手势被平台拒收（dispatchGesture 拒绝或系统取消），宿主如实回执。

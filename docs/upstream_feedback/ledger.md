@@ -60,3 +60,17 @@
 - 备注（观察项）：成功路径中 bridge 统计 `leases_released` 恒为 0，而宿主侧
   release 被调用（outstanding 归零、destroy 无悬挂）；疑似 bridge 侧计数与
   observe 尾部 `outcome.lease.release()` 路径脱节，请上游核对统计口径。
+
+### MIR-20260906-005：InputSequence 不携带手势时长
+
+- 状态：Open
+- 分级：P3（v1 决策协议未含时长，宿主默认时长可工作；显式时长控制受限）
+- 证据：mira `16e419e` 的 `include/mira/environment.hpp`：`InputEvent` 仅
+  `kind + payload(string)`；`adapters/android/android_host_adapter.cpp` 的
+  `execute()` 对 long_press/swipe 仅解析坐标，`MiraHostInputEventV1.duration_ms`
+  恒为 0。宿主侧 `duration_ms` 默认（long_press 600ms / swipe 350ms）。
+- 影响：决策层无法表达"慢速滑动/超长短按"等时长语义；P2 取消契约测试被迫
+  走直接 ABI 探针（adapter 路径无法注入 3000ms 长按）。
+- 期望语义：`InputEvent` 增加可选时长字段（或 payload schema 扩展），adapter
+  填充 ABI `duration_ms`；缺失时维持 0（宿主默认）。
+- 可验收结果：经 adapter 路径派发显式时长的 long_press，宿主按指定时长合成。

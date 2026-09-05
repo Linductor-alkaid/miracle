@@ -57,3 +57,48 @@
 - 新增受支持设备：Huawei ADA-AL00（Android 12 / API 31 / EMUI 14.2）——同一 APK
   零改动，P0+P1 自检均通过（Runtime verified(device)）；观察项：首跑授权对话框
   未阻塞（待查），EMUI 对话框布局与 ColorOS 不同。
+
+## [未发布] P2
+
+### 新增
+
+- Host ABI v1 输入实现（`host_abi_impl.cpp`）：`dispatch_input` 全语义（逐事件
+  校验快速失败、操作注册表复用、恰好一次完成结算携带 receipt 与
+  side_effect_may_have_occurred）、输入协作取消（异步结算：未提交→CANCELLED、
+  已提交→EXECUTION_UNCERTAIN）、`stop` 在途输入有界排空、能力位如实
+  （input mask bits 1..7 / max_gesture_duration 60s / max_pointers 1，无障碍
+  断开即归零）。
+- 输入链路（Kotlin）：`MiracleAccessibilityService`（dispatchGesture/焦点查找/
+  前台包名跟踪/epoch 通知）+ `InputDispatcher`（tap/long_press/swipe 手势合成、
+  type=ACTION_SET_TEXT、back/home 全局动作、RELEASE_ALL、有界并发 16）+
+  `DisplayGeometry`（无投影拓扑兜底，输入链路不依赖投影）。
+- P2 自检双轨：直接 ABI 契约探针（非法参数/过期 deadline/RELEASE_ALL/长按中途
+  取消/取消后复验）+ 经 mira adapter 会话（InputSequence→execute() 全链路，
+  对自身 UI 断言副作用）；P2 自检页（无障碍引导、靶点/长按/滑动/文本/BackHandler
+  交互区、探针与会话结果、违规计数展示）。
+
+### 修正
+
+- 输入取消语义按平台事实落地：公共 API 无 `AccessibilityService.cancelGesture`
+  （API 35 android.jar 实测），已提交手势不可中断、自然收敛后按
+  `EXECUTION_UNCERTAIN+side=1` 结算（host_abi.h 冻结的原子输入约定）；
+  "合成抬起事件"登记为已知限制。
+- Compose `boundsInWindow` 与屏幕原点的厂商偏差（真机约 77px）经
+  `LocalView.getLocationOnScreen` 屏幕锚定修正。
+- 无障碍服务独立启动路径的 native 库加载崩溃（`UnsatisfiedLinkError`）修复：
+  `HostBridge.ensureNative()` 幂等守卫。
+
+### 验证
+
+- 真机（OnePlus Ace 3）：探针 5/5（取消→EXECUTION_UNCERTAIN side=1、取消后 tap
+  复验通过）；adapter 会话 7/7 步 Completed（tap/long_press/swipe/back/type/
+  home），UI 副作用断言全过，违规计数全 0，连续两次完整通过；负向
+  （无障碍未连接→PermissionDenied fail-closed、无崩溃）；旋转 epoch 递增（1→2）
+  且旋转后落点正确；force-stop 干净退出（Runtime verified(device)）。
+- 单测 20/20；`assembleDebug lintDebug testDebugUnitTest` 全绿。
+- 兼容性：ColorOS 16 拦截无障碍源 `GLOBAL_ACTION_HOME`（派发成功不导航），
+  经 CATEGORY_HOME intent 兜底（前台会话可达）；记录于
+  `docs/compatibility/oneplus-ace3.md`。
+- 上游台账：新增 `MIR-20260906-005`（mira InputSequence 不携带手势时长）。
+- 已知限制：模拟器输入回归未执行（补跑条件见 P2 计划）；home 后台导航兜底
+  受后台启动限制（P3 悬浮窗权限后覆盖）。

@@ -51,7 +51,7 @@
 | `runtime.AgentRuntime` | Kotlin | 门面：会话启动/停止/takeover、状态流、事件流、确认请求流 | `suspend fun startSession(goal)`、`StateFlow<SessionState>`、`SharedFlow<SessionEvent>`、`SharedFlow<ConfirmationRequest>` |
 | `consent.SessionGate` | Kotlin | 同意门面：披露确认、能力授权状态、会话准入、活动指示控制 | `fun canStartSession(): GateStatus` |
 | `host.ScreenCaptureProvider` | Kotlin | MediaProjection 授权、VirtualDisplay+ImageReader、帧租约（RGBA） | `fun requestFrame(deadline): FrameLease` |
-| `host.InputDispatcher` | Kotlin | 手势合成与 dispatchGesture、文本注入、取消与 RELEASE_ALL | `fun dispatch(events, deadline): Receipt` |
+| `host.InputDispatcher` | Kotlin | 手势合成与 dispatchGesture、焦点文本注入、取消（原子语义：未提交 CANCELLED／已提交 EXECUTION_UNCERTAIN+side=1）与 RELEASE_ALL | `fun dispatch(events, deadline): Receipt` |
 | `host.CapabilityRegistry` | Kotlin | 能力快照、epoch 维护（旋转/权限/会话变化递增）、权限自检 | `fun snapshot(): HostCapabilities` |
 | `bridge.host_abi_impl` | C++ | 实现 `mira_android_host_*` 全部符号；操作注册表（correlation→pending）；lease 生命周期 | （被 mira adapter 调用，无上层接口） |
 | `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、AndroidHostAdapter+AgentLoop+ModelGateway 组装、观察者回调封送 | JNI 导出：`nativeInit/nativeStartTask/nativeTakeover/nativeShutdown` 等 |
