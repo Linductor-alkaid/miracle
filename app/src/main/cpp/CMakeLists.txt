@@ -1,6 +1,5 @@
-# Miracle JNI bridge：P0 仅链接 Mira::core（RuntimeBaseline 所在）。
-# Mira::android_adapter 于 P1 起（届时必须同时提供 host_abi_impl 的 ABI 符号实现）；
-# transport/state_store 于 P3 增量接入（见 docs/plans/p0-skeleton-consumption.md 范围说明）。
+# Miracle JNI bridge：P1 起链接 Mira::android_adapter（Host ABI v1 符号由
+# host_abi_impl.cpp 在本库内提供）；transport/state_store 于 P3 增量接入。
 cmake_minimum_required(VERSION 3.22)
 project(miracle_host LANGUAGES CXX)
 
@@ -20,6 +19,8 @@ list(APPEND CMAKE_FIND_ROOT_PATH "${CMAKE_PREFIX_PATH}")
 
 find_package(Mira 0.1 CONFIG REQUIRED)
 
-add_library(miracle_host SHARED runtime_glue.cpp)
+add_library(miracle_host SHARED
+    runtime_glue.cpp
+    host_abi_impl.cpp)
 target_compile_options(miracle_host PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(miracle_host PRIVATE Mira::core log)
+target_link_libraries(miracle_host PRIVATE Mira::core Mira::android_adapter log)
