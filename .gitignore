@@ -1,0 +1,28 @@
+# Gradle / Android 构建产物
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.aab
+*.hprof
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# 签名与凭据（永不入库）
+*.jks
+*.keystore
+keystore.properties
+
+# mira 消费产物（由 tools/mira.lock + tools/install-mira.sh 复现）
+third_party/mira-install/
+third_party/mira-src/
+
+# 验证产物与日志
+*.log
+captures/
