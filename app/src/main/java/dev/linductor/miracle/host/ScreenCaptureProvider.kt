@@ -151,58 +151,67 @@ class ScreenCaptureProvider(context: Context, private val projection: MediaProje
             } else {
                 4_000L
             }
-            val image = awaitLatestImage(timeoutMs)
-            if (image == null) {
-                Log.w(TAG, "no frame arrived within ${timeoutMs}ms (latest=${latest != null})")
-                done(Result.failure(TimeoutException("no frame within ${timeoutMs}ms")))
-                return@launch
-            }
             try {
-                done(Result.success(copyFrame(image, beginNs)))
+                val captured = awaitFrameCopy(timeoutMs, beginNs)
+                if (captured == null) {
+                    Log.w(TAG, "no frame arrived within ${timeoutMs}ms (latest=${latest != null})")
+                    done(Result.failure(TimeoutException("no frame within ${timeoutMs}ms")))
+                } else {
+                    done(Result.success(captured))
+                }
             } catch (error: Exception) {
                 done(Result.failure(error))
             }
         }
     }
 
-    private suspend fun awaitLatestImage(timeoutMs: Long): Image? =
+    /**
+     * 等待并拷贝最新帧。取引用与拷贝同处 frameLock 临界区：listener 替换/关闭旧帧
+     * 也需该锁，杜绝"await 返回后、拷贝前持帧已被关闭"的竞争——整屏模式下录屏
+     * 指示动画使帧持续翻动，该窗口不再是罕见路径。
+     */
+    private suspend fun awaitFrameCopy(timeoutMs: Long, beginNs: Long): HostBridge.CapturedFrame? =
         withTimeoutOrNull(timeoutMs) {
             while (isActive) {
-                latest?.let { return@withTimeoutOrNull it }
+                val captured = synchronized(frameLock) {
+                    latest?.let { image -> copyFrameLocked(image, beginNs) }
+                }
+                if (captured != null) {
+                    return@withTimeoutOrNull captured
+                }
                 delay(5)
             }
             null
         }
 
-    private fun copyFrame(image: Image, beginNs: Long): HostBridge.CapturedFrame {
-        synchronized(frameLock) {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            val rowStride = plane.rowStride
-            val pixelStride = plane.pixelStride
-            require(pixelStride == 4 && rowStride >= image.width * 4) {
-                "unexpected RGBA plane layout: pixel=$pixelStride row=$rowStride w=${image.width}"
-            }
-            val width = image.width
-            val height = image.height
-            val out = ByteArray(width * height * 4)
-            val row = ByteArray(rowStride)
-            var position = 0
-            for (y in 0 until height) {
-                buffer.position(y * rowStride)
-                buffer.get(row, 0, rowStride)
-                System.arraycopy(row, 0, out, position, width * 4)
-                position += width * 4
-            }
-            return HostBridge.CapturedFrame(
-                width = width,
-                height = height,
-                rotation = rotation,
-                pixels = out,
-                beginNs = beginNs,
-                endNs = System.nanoTime(),
-            )
+    /** 调用方持有 frameLock；image 必为锁内当前的 latest（未关闭）。 */
+    private fun copyFrameLocked(image: Image, beginNs: Long): HostBridge.CapturedFrame {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        require(pixelStride == 4 && rowStride >= image.width * 4) {
+            "unexpected RGBA plane layout: pixel=$pixelStride row=$rowStride w=${image.width}"
         }
+        val width = image.width
+        val height = image.height
+        val out = ByteArray(width * height * 4)
+        val row = ByteArray(rowStride)
+        var position = 0
+        for (y in 0 until height) {
+            buffer.position(y * rowStride)
+            buffer.get(row, 0, rowStride)
+            System.arraycopy(row, 0, out, position, width * 4)
+            position += width * 4
+        }
+        return HostBridge.CapturedFrame(
+            width = width,
+            height = height,
+            rotation = rotation,
+            pixels = out,
+            beginNs = beginNs,
+            endNs = System.nanoTime(),
+        )
     }
 
     fun topologyJson(): String {
