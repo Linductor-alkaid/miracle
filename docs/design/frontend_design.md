@@ -1,8 +1,8 @@
 # Miracle 前端设计
 
-> 状态：Proposed
-> 版本：1.0
-> 更新日期：2026-09-05
+> 状态：Proposed（P3 实现同步修订）
+> 版本：1.1
+> 更新日期：2026-09-06
 > 上位文档：[总体架构设计](system_architecture_design.md)
 > 关联决策：[DEC-001 前端形态](../decisions/DEC-001-frontend-compose.md)
 
@@ -47,7 +47,9 @@ UI（组合函数 = 组件、状态驱动重组 = re-render、单向数据流）
 
 ## 3. UI 架构
 
-- **单 Activity + Compose Navigation**；无 Fragment（v1 无需）。
+- **单 Activity + Compose Navigation**；无 Fragment（v1 无需）。P3 实现注记：以枚举
+  底部导航（任务/自检/设置）承载三页切换，暂未引入 navigation 依赖（页面量小，
+  P3 计划决策 10 记录偏差）；页面增多时再引入路由库。
 - **单向数据流（UDF）**：UI 事件 → `ViewModel` 意图 → `AgentRuntime` 门面 → 状态流更新 →
   UI 重组。ViewModel 只做投影与编排，不承载业务规则。
 - **唯一事实源**：运行时状态来自 `AgentRuntime`（架构设计 §5）；页面级局部状态允许
@@ -62,7 +64,7 @@ UI（组合函数 = 组件、状态驱动重组 = re-render、单向数据流）
 | Onboarding（首次/权限缺失时） | 显著披露（截图出设备、触控模拟）→ 分步授权向导（通知→悬浮窗→无障碍→投影）→ 每步系统返回后自检 | `SessionGate` |
 | Home 任务台 | 当前会话卡（状态相位、步数、动作计数、takeover 按钮）、新目标输入、历史任务列表 | `AgentRuntime` |
 | SessionDetail | 状态时间线（步进、动作摘要、验证结论）、事件流、（P4）replay 检视与截图引用 | 事件流 + 持久状态 |
-| Settings | 模型端点/凭据（Keystore 加密）、预算与步数上限、R3 策略表开关、关于/版本 | DataStore |
+| Settings | 提供商预设（P3 补充：内置目录一键套用端点/前缀/方言/模型建议值，仅需填 API key；mira 公共 API 无提供商注册表，预设含上游 mira docs/model_provider 已验证的 MiniMax/SiliconFlow，其余按各厂商公开 OpenAI 兼容端点配置（Configured 级），互操作以连通性自检为准）、模型端点/凭据（Keystore 加密）、预算与步数上限、R3 策略表开关、关于/版本 | DataStore |
 | ConfirmationDialog | R3 动作确认：动作摘要、风险说明、剩余时间 | `ConfirmationRequest` 流 |
 
 组件树（示意）：
@@ -83,7 +85,9 @@ App(theme, nav)
 - **悬浮球（常驻态，原生 View）**：`TYPE_APPLICATION_OVERLAY` 窗口 + 自绘 `View`（画布绘
   制状态环）。理由：常驻显示不需要 Compose 运行时开销；拖动、边缘吸附、长按手势用原生
   触摸处理最稳。状态环颜色映射 `SessionState`（灰=Idle、蓝=Observing/Reasoning、橙=
-  Acting、绿=Completed、红=Failed/需确认、闪烁=Takeover 待恢复）。
+  Acting、绿=Completed、红=Failed/需确认、闪烁=Takeover 待恢复）。P3 实现注记：球随
+  `AgentForegroundService`（投影会话）生命周期显示；拖动为屏内贴指移动（边缘吸附为
+  简化实现）；长按 ≥600ms 触发 takeover；运行相位高频呼吸＝活动指示。
 - **展开面板（交互态，Compose）**：点击球体展开第二个 overlay 窗口，内嵌 `ComposeView`
   （为其装配 `ViewTreeLifecycleOwner`/`SavedStateRegistryOwner` 的宿主实现）。面板提供：
   快捷新目标、暂停/继续、停止、takeover、最近动作摘要。关闭即回收窗口与 Composition。

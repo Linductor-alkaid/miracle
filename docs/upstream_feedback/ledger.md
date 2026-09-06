@@ -12,7 +12,12 @@
 
 ### MIR-20260905-001：AndroidHostAdapter 不提供 structure 观察
 
-- 状态：Open
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#16](https://github.com/Linductor-alkaid/mira/pull/16) `b12383d` + DEC-012）
+- 关闭注记（2026-09-06）：上游 `capabilities().ui_tree` 镜像宿主 `accessibility_completeness`；
+  `observe()` 经 `MIRA_HOST_OP_GET_UI_TREE` 聚合 `mira.host.tree.v1` JSON（fail-closed 解析、
+  未知 token 降级、[0,1] 规范 bounds、BoundedSkew 声明）。Miracle 宿主侧仍声明
+  `accessibility_completeness = 0`（UI 树聚合未实现，能力诚实）；启用为后续计划项
+  （Kotlin 无障碍树 → mira.host.tree.v1 序列化 + completeness 声明切换）。
 - 分级：P2（结构性：v1 全部任务失去 UI 树 grounding）
 - 证据：mira `16e419e` 的 `adapters/android/android_host_adapter.cpp`：
   `capabilities()` 不采纳 `accessibility_completeness`；`observe()` 对非 screen 组件请求
@@ -27,7 +32,8 @@
 
 ### MIR-20260905-002：AgentLoop 内 ToolProposals 不可执行
 
-- 状态：Open（与 DEC-002 的 `POST-01` 关联）
+- 状态：Open（与 DEC-002 的 `POST-01` 关联；已反馈上游：mira
+  [#8](https://github.com/Linductor-alkaid/mira/issues/8)，2026-09-06）
 - 分级：P3（当前未使用该能力，属方向性缺口）
 - 证据：mira `16e419e` 的 `src/model/agent_loop.cpp`："tool proposals are not executable
   in the M3 loop"；DEC-009/M7 Blocked。
@@ -37,7 +43,11 @@
 
 ### MIR-20260905-003：缺少 android-x86_64 构建预设
 
-- 状态：Open
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#16](https://github.com/Linductor-alkaid/mira/pull/16) `403e69d`+`6d49cc7`，CI 含 arm64+x86_64 矩阵）
+- 关闭注记（2026-09-06）：上游提供 `android-x86_64-base/-release` 预设与工具链文件，
+  ABI guard 接受双 ABI，CI 矩阵覆盖。Miracle 侧模拟器回归路径（`POST-02`）解锁：
+  lock 仍钉 `android-arm64-release`（真机基线），x86_64 消费构建与 instrumented 冒烟
+  为后续独立变更（需扩展 lock/构建脚本双 ABI）。
 - 分级：P3
 - 证据：mira `CMakePresets.json` 仅有 `android-arm64-*`；平台矩阵声明单 ABI。
 - 影响：无真机时缺乏模拟器回归路径（Miracle `POST-02`）。
@@ -46,7 +56,12 @@
 
 ### MIR-20260905-004：AndroidHostAdapter 内置 MemoryArtifactStore 容量不可配置
 
-- 状态：Open
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#16](https://github.com/Linductor-alkaid/mira/pull/16) `b12383d` + DEC-012；备注统计问题经 `769de83` 修复）
+- 关闭注记（2026-09-06）：`AndroidHostAdapterOptions` 支持注入 `IArtifactStore`
+  （含 FileArtifactStore）或声明 adapter 自有 store 容量（默认 8→64 MiB）。
+  Miracle 随 lock 升级落地：loop 注入 128 MiB `HostFrameStore`（原始帧转码 PNG 后
+  即回收）；宿主降采样（0.9M px）自"容量规避"转为"载荷大小策略"，全分辨率档
+  待真机补跑评估。`leases_released` 统计口径经 `769de83` 覆盖全部释放路径。
 - 分级：P2（结构性：真机分辨率下闭环第二步即耗尽）
 - 证据：miracle 真机（PJE110）P1 自检：帧 852×1876 RGBA≈6.4MB，第二帧 observe
   失败 `"artifact store capacity exhausted"`；`AndroidHostAdapter` 构造中硬编码
@@ -60,10 +75,16 @@
 - 备注（观察项）：成功路径中 bridge 统计 `leases_released` 恒为 0，而宿主侧
   release 被调用（outstanding 归零、destroy 无悬挂）；疑似 bridge 侧计数与
   observe 尾部 `outcome.lease.release()` 路径脱节，请上游核对统计口径。
+  （已单独反馈上游：mira [#12](https://github.com/Linductor-alkaid/mira/issues/12)；
+  修复见 `769de83`，HostLeaseGuard 携带 ReleaseObserver 覆盖全部释放路径）
 
 ### MIR-20260906-005：InputSequence 不携带手势时长
 
-- 状态：Open
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#16](https://github.com/Linductor-alkaid/mira/pull/16) `b12383d`）
+- 关闭注记（2026-09-06）：`mira::InputEvent` 新增 `duration_ms`（默认 0＝宿主默认），
+  adapter 映射到 ABI `duration_ms` 并对超宿主 `max_gesture_duration_ms` 的值拒绝。
+  Miracle 侧 `inputTestDispatch` 的 adapter 路径已接线（此前 JNI 参数被丢弃，
+  workaround 注释移除）；P2 直接 ABI 契约探针保留（host 侧契约测试语义不变）。
 - 分级：P3（v1 决策协议未含时长，宿主默认时长可工作；显式时长控制受限）
 - 证据：mira `16e419e` 的 `include/mira/environment.hpp`：`InputEvent` 仅
   `kind + payload(string)`；`adapters/android/android_host_adapter.cpp` 的
@@ -74,3 +95,58 @@
 - 期望语义：`InputEvent` 增加可选时长字段（或 payload schema 扩展），adapter
   填充 ABI `duration_ms`；缺失时维持 0（宿主默认）。
 - 可验收结果：经 adapter 路径派发显式时长的 long_press，宿主按指定时长合成。
+
+### MIR-20260906-006：安装包未导出网络传输头文件（有库无头）
+
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#17](https://github.com/Linductor-alkaid/mira/pull/17) `d4eede5`；`include/mira/adapters/net/` 随包导出）
+- 关闭注记（2026-09-06）：三个 transport 头（socket/mbedtls/openssl）迁入公共头
+  树随包导出，`find_package(Mira)` 消费者可合法声明官方传输类（上游安装消费者
+  测试覆盖构造 `SocketHttpTransport` + `MbedTlsChannelFactory`）。Miracle 保留
+  Kotlin `IHttpTransport` 宿主传输（公共扩展点，系统信任库、无 PEM CA 供给负担）；
+  切换官方 transport 为后续独立变更（Android 侧 CA bundle 供给与取消语义需设计）。
+- 分级：P2（结构性：宿主无法使用官方生产传输，被迫自建传输实现）
+- 证据：mira `16e419e` 的 `CMakeLists.txt` L400-430：`mira_net_transport`/
+  `mira_mbedtls_transport` 安装了库，但 `install(DIRECTORY include/ …)` 只安装主
+  include 目录；`adapters/net/socket_transport.hpp`、`adapters/net/mbedtls_tls.hpp`
+  未随包导出（`third_party/mira-install/include/mira/` 实测无 `adapters/net/`）。
+  符号 `SocketHttpTransport`/`MbedTlsChannelFactory` 在库中可见，但消费者无法以合法
+  头文件声明它们。
+- 影响：P3 起需要模型调用的宿主只能：(a) 自行实现公共 `IHttpTransport`（Miracle P3
+  采用，重复 socket/HTTPS 工作），或 (b) 以手写类声明消费非导出头（ABI 脆弱，违反
+  消费边界）。M3 测试自身依赖测试内 `MockHttpTransport`，官方 transport 无包外消费者。
+- 期望语义：`adapters/net/*.hpp` 随安装包导出（如 `include/mira/adapters/net/`），
+  `Mira::net_transport`/`Mira::mbedtls_transport` 目标携带对应 usage requirement。
+- 可验收结果：消费者仅以安装前缀 + `find_package(Mira)` 即可构造
+  `SocketHttpTransport` + `MbedTlsChannelFactory`（PEM CA 由宿主提供）并发起 https
+  模型调用；新增最小消费者测试进 mira CI。
+
+### MIR-20260906-007：AgentLoop 图像 artifact 路径对真实 OpenAI 兼容 VLM 不可消费
+
+- 状态：Resolved（上游 mira `cbed6ad`，PR [#17](https://github.com/Linductor-alkaid/mira/pull/17) `423c837` + DEC-013"宿主负责编码"；Miracle 宿主编码已随 lock 升级落地，真机取证待补跑）
+- 关闭注记（2026-09-06）：`ScreenFrameDescriptor` 携带 `payload_media_type/
+  payload_byte_size/payload_digest`（adapter 自 store commit 记录填充）；
+  `build_request` 的 `ArtifactRef` 取自该记录；方言层对非 image 系媒体类型在
+  fetch 前 fail-closed（本地可诊断）。Miracle 落地链路：Kotlin 截屏同步 PNG 编码
+  → 帧完成以原始字节 sha256 为键登记 → 注入 loop 的 `HostFrameStore`（DEC-012
+  注入点）commit 时重新发布为 `image/png` 工件 → `StoreArtifactSource` 经公共
+  store API 供 wire 层回读 → data:image/png 数据 URL。P3 真实任务（≥3 类）补跑
+  条件仅剩：真机连接 + 用户配置真实端点。
+- 分级：P1（系统性：闭环真实模型任务全量阻断）
+- 证据：mira `16e419e` 的 `src/model/agent_loop.cpp` `build_request()`：截图
+  `ArtifactRef.media_type` 硬编码 `"application/octet-stream"`、`byte_size = w*h*4`
+  （原始 RGBA）；`src/model/model_dialect.cpp` `fetch_image_data_url()` 据此生成
+  `data:application/octet-stream;base64,<RGBA>` 数据 URL——真实 OpenAI 兼容端点要求
+  `image/png`/`image/jpeg`。同时 `AndroidHostAdapter::artifacts_`（MemoryArtifactStore）
+  私有且无公共读取 API，宿主 `IArtifactSource` 无从取得观察字节（m3 测试经
+  `SimulatorEnvironment::open_artifact` 公共 API 取得——Android 侧等价物缺失）。
+- 影响：Miracle P3 验收项"≥3 类真实任务端到端"不可达：即使宿主提供传输，闭环每步
+  截图部件在 wire 层必然被真实端点拒绝；M3 闭环仅对 fixture transport 验证过。
+- 期望语义（任一组合均可）：(a) adapter 提供工件读取 API（或允许注入宿主
+  IArtifactStore），宿主负责 RGBA→PNG/JPEG 编码与降采样（顺带缓解 MIR-004 的 8MB
+  容量问题），且 `build_request` 的 `ImagePart` 媒体类型来自工件描述符而非硬编码；
+  或 (b) 上游在 provider/mapper 内完成图像编码并声明媒体类型。
+- 可验收结果：真机截图经 ABI 进入 Observation 后，以 `image/png`/`image/jpeg` 数据
+  URL 出现在 wire 请求体（真实端点 200 + decision 返回）；Miracle 补跑 ≥3 类真实任务
+  取证（P3 退出条件）。
+- 备注：与 `MIR-20260905-004`（artifact 容量不可配置）同源不同症，上游 DEC-012/013
+  合并评估后一并修复。

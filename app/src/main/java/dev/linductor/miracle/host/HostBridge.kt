@@ -20,12 +20,16 @@ import java.util.concurrent.TimeoutException
  */
 object HostBridge {
 
-    /** 单帧拷贝结果（RGBA8888，行已紧凑）。 */
+    /**
+     * 单帧拷贝结果（RGBA8888，行已紧凑）。[encoded] 为同步编码的 PNG 载荷
+     * （mira DEC-013 宿主编码路径；null/空＝未编码，原始帧按 x-host-frame 发布）。
+     */
     data class CapturedFrame(
         val width: Int,
         val height: Int,
         val rotation: Int,
         val pixels: ByteArray,
+        val encoded: ByteArray?,
         val beginNs: Long,
         val endNs: Long,
     )
@@ -203,24 +207,57 @@ object HostBridge {
         return if (current.isActive) 0 else 1
     }
 
+    // ---- P3：模型传输 / 闭环事件 / R3 准入（native 下行 → AgentRuntime 门面） ----
+
+    /** native 调用：传输就绪（loopOpen(kotlin)/连通性自检前置）。 */
+    @JvmStatic
+    fun transportReady(): Boolean = dev.linductor.miracle.runtime.AgentRuntime.transportReady()
+
+    /** native 调用：受理一次 HTTPS 交换（异步；完成经 [nativeHttpExchangeComplete] 回流）。 */
+    @JvmStatic
+    fun httpExchangeStart(exchangeId: Long, requestJson: String, body: ByteArray): Int =
+        dev.linductor.miracle.runtime.AgentRuntime.httpExchangeStart(exchangeId, requestJson, body)
+
+    /** native 调用：协作取消一次交换（disconnect）。 */
+    @JvmStatic
+    fun httpExchangeCancel(exchangeId: Long) =
+        dev.linductor.miracle.runtime.AgentRuntime.httpExchangeCancel(exchangeId)
+
+    /** native 上投：闭环事件（相位/终态/确认请求与结算/会话状态）。 */
+    @JvmStatic
+    fun onLoopEvent(wrappedJson: String) {
+        // 真机取证证据流（P2 实践：Compose 语义树对 uiautomator 陈旧，以 logcat JSON
+        // 为准）；payload 均为 safe 级内容（无凭据/无 type 文本）。
+        android.util.Log.i("miracle/loop", wrappedJson)
+        dev.linductor.miracle.runtime.AgentRuntime.handleNativeEvent(wrappedJson)
+    }
+
+    /** native 调用：R3 准入询问（0=放行 1=需确认 2=拒绝）。 */
+    @JvmStatic
+    fun consentCheckInput(eventsJson: String): Int =
+        dev.linductor.miracle.runtime.AgentRuntime.consentCheck(eventsJson)
+
     private fun complete(correlation: Long, result: Result<CapturedFrame>) {
         result.onSuccess { frame ->
             android.util.Log.i(
                 "miracle/hostbridge",
                 "frame ${frame.width}x${frame.height} rot=${frame.rotation} " +
-                    "${frame.pixels.size}B in ${(frame.endNs - frame.beginNs) / 1_000_000}ms",
+                    "${frame.pixels.size}B png=${frame.encoded?.size ?: 0}B " +
+                    "in ${(frame.endNs - frame.beginNs) / 1_000_000}ms",
             )
             _frames.value = (_frames.value + frame).takeLast(4)
             nativeCompleteFrame(
                 correlation, 1, frame.width, frame.height, frame.rotation,
-                frame.pixels, frame.beginNs, frame.endNs, 0,
+                frame.pixels, frame.encoded ?: ByteArray(0), frame.beginNs, frame.endNs, 0,
             )
         }.onFailure { error ->
             android.util.Log.w(
                 "miracle/hostbridge",
                 "frame failed for correlation $correlation: $error",
             )
-            nativeCompleteFrame(correlation, 0, 0, 0, 0, ByteArray(0), 0, 0, mapError(error))
+            nativeCompleteFrame(
+                correlation, 0, 0, 0, 0, ByteArray(0), ByteArray(0), 0, 0, mapError(error),
+            )
         }
     }
 
@@ -239,6 +276,7 @@ object HostBridge {
         height: Int,
         rotation: Int,
         pixels: ByteArray,
+        encoded: ByteArray,
         beginNs: Long,
         endNs: Long,
         errCode: Int,
@@ -287,4 +325,47 @@ object HostBridge {
     /** P2 adapter 会话：关闭（adapter 销毁 + executor shutdown，返回统计 JSON）。 */
     @JvmStatic
     external fun inputTestClose(): String
+
+    // ---- P3：闭环运行时与模型连通性（阻塞 JNI；调用方保证非主线程） ----
+
+    /** 打开闭环运行时（config 见 AgentRuntime/ModelConfig.toNativeJson）。1=ok 负数=错误码。 */
+    @JvmStatic
+    external fun loopOpen(configJson: String): Int
+
+    /** 提交目标（max_steps<=0 用配置默认）。1=ok 负数=错误码。 */
+    @JvmStatic
+    external fun loopSubmit(goal: String, maxSteps: Int): Int
+
+    /** 协作取消当前任务。 */
+    @JvmStatic
+    external fun loopCancel(): Int
+
+    /** Human Takeover（阻断新决策 + RELEASE_ALL + 确认失效）。 */
+    @JvmStatic
+    external fun loopTakeover(): Int
+
+    /** 关闭运行时，返回统计 JSON。 */
+    @JvmStatic
+    external fun loopClose(): String
+
+    /** 当前状态 JSON。 */
+    @JvmStatic
+    external fun loopState(): String
+
+    /** 模型连通性自检（阻塞；文本-only 决策请求），返回结果 JSON。 */
+    @JvmStatic
+    external fun modelConnectivityTest(configJson: String): String
+
+    /** R3 确认回流：0=放行 1=拒绝 2=未找到 -3=校验失败 -4=派发失败。 */
+    @JvmStatic
+    external fun consentResolve(challenge: String, nonce: String, approve: Boolean): Int
+
+    /** native 传输完成回流（Kotlin HttpTransportBinding → native）。 */
+    @JvmStatic
+    external fun nativeHttpExchangeComplete(
+        exchangeId: Long,
+        status: Int,
+        headersJson: String,
+        body: ByteArray,
+    )
 }

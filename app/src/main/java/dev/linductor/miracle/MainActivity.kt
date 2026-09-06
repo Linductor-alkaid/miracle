@@ -33,13 +33,18 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,7 +56,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -59,12 +63,22 @@ import dev.linductor.miracle.host.AgentForegroundService
 import dev.linductor.miracle.host.DisplayGeometry
 import dev.linductor.miracle.host.HostBridge
 import dev.linductor.miracle.host.MiracleAccessibilityService
+import dev.linductor.miracle.runtime.AgentRuntime
 import dev.linductor.miracle.ui.CaptureState
 import dev.linductor.miracle.ui.CaptureViewModel
+import dev.linductor.miracle.ui.ConfirmationHost
 import dev.linductor.miracle.ui.InputState
 import dev.linductor.miracle.ui.InputViewModel
+import dev.linductor.miracle.ui.KeyValue
+import dev.linductor.miracle.ui.LoopSelfTestCard
+import dev.linductor.miracle.ui.LoopSelfTestViewModel
+import dev.linductor.miracle.ui.SessionTab
+import dev.linductor.miracle.ui.SessionViewModel
+import dev.linductor.miracle.ui.SettingsScreen
+import dev.linductor.miracle.ui.SettingsViewModel
 import dev.linductor.miracle.ui.SmokeUiState
 import dev.linductor.miracle.ui.SmokeViewModel
+import dev.linductor.miracle.ui.StatusLine
 import java.nio.ByteBuffer
 
 class MainActivity : ComponentActivity() {
@@ -72,11 +86,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        AgentRuntime.attach(applicationContext)
+        pendingAutoScenario = intent?.getStringExtra(EXTRA_AUTO_SCENARIO)
+            ?.takeIf { it in AUTO_SCENARIOS }
+        if (pendingAutoScenario != null) {
+            autoScenarioSequence += 1
+        }
         setContent {
             MaterialTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MiracleApp(
                         modifier = Modifier.padding(innerPadding),
+                        autoScenario = pendingAutoScenario,
+                        autoScenarioSequence = autoScenarioSequence,
+                        onAutoScenarioConsumed = { pendingAutoScenario = null },
                         onRequestProjection = {
                             captureViewModel.begin()
                             requestProjectionWithNotification()
@@ -84,6 +107,25 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 授权返回后刷新准入状态（无障碍/悬浮窗/通知在系统设置页变更）。
+        sessionViewModel.refreshGate(applicationContext)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 真机取证入口：adb shell am start --es auto_scenario <name>（见
+        // tools/p3-device-verify.sh）；仅接受已知场景名，其余忽略。
+        val scenario = intent.getStringExtra(EXTRA_AUTO_SCENARIO)?.takeIf {
+            it in AUTO_SCENARIOS
+        }
+        if (scenario != null) {
+            pendingAutoScenario = scenario
+            autoScenarioSequence += 1
         }
     }
 
@@ -113,6 +155,7 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == Activity.RESULT_OK && data != null) {
                 AgentForegroundService.start(this, result.resultCode, data)
                 captureViewModel.markConsumed()
+                sessionViewModel.refreshGate(applicationContext)
             } else {
                 captureViewModel.markDenied()
             }
@@ -121,6 +164,31 @@ class MainActivity : ComponentActivity() {
     private val captureViewModel: CaptureViewModel by lazy {
         androidx.lifecycle.ViewModelProvider(this)[CaptureViewModel::class.java]
     }
+
+    private val sessionViewModel: SessionViewModel by lazy {
+        androidx.lifecycle.ViewModelProvider(this)[SessionViewModel::class.java]
+    }
+
+    companion object {
+        const val EXTRA_AUTO_SCENARIO = "dev.linductor.miracle.extra.AUTO_SCENARIO"
+        val AUTO_SCENARIOS =
+            listOf("complete", "max_steps", "cancel", "r3", "connectivity")
+    }
+
+    /** 待执行的取证场景（Compose State：onNewIntent 变更驱动重组消费）。 */
+    var pendingAutoScenario: String? by androidx.compose.runtime.mutableStateOf(null)
+        private set
+
+    /** 场景序号（onNewIntent 递增，驱动 Compose 重复触发同名场景）。 */
+    var autoScenarioSequence: Int by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+}
+
+/** 底部三页：任务 / 自检 / 设置（P3 计划决策 10：枚举页面切换承载导航语义）。 */
+private enum class MiracleTab(val label: String) {
+    TASKS("任务"),
+    SELF_TEST("自检"),
+    SETTINGS("设置"),
 }
 
 @Composable
@@ -129,31 +197,87 @@ fun MiracleApp(
     smokeViewModel: SmokeViewModel = viewModel(),
     captureViewModel: CaptureViewModel = viewModel(),
     inputViewModel: InputViewModel = viewModel(),
+    sessionViewModel: SessionViewModel = viewModel(),
+    loopSelfTestViewModel: LoopSelfTestViewModel = viewModel(),
+    settingsViewModel: SettingsViewModel = viewModel(),
+    autoScenario: String? = null,
+    autoScenarioSequence: Int = 0,
+    onAutoScenarioConsumed: () -> Unit = {},
     onRequestProjection: () -> Unit = {},
 ) {
-    val smokeState by smokeViewModel.state.collectAsStateWithLifecycle()
-    val captureState by captureViewModel.state.collectAsStateWithLifecycle()
-    val frames by captureViewModel.frames.collectAsStateWithLifecycle()
+    var tab by remember { mutableStateOf(MiracleTab.TASKS) }
+    val context = LocalContext.current
+
     LaunchedEffect(Unit) {
         smokeViewModel.runSelfTest()
+        sessionViewModel.refreshGate(context)
     }
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text("Miracle", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "P0 骨架自检 · P1 截屏链路自检 · P2 输入链路自检",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        SmokeCard(state = smokeState, onRun = smokeViewModel::runSelfTest)
-        CaptureCard(state = captureState, frames = frames, onStart = onRequestProjection)
-        InputCard(viewModel = inputViewModel)
-        PlaceholderCard()
+
+    // 真机取证：场景经 am start extra 注入，切到自检页并触发（靶点坐标绑定后）。
+    LaunchedEffect(autoScenario, autoScenarioSequence) {
+        if (autoScenario != null) {
+            tab = MiracleTab.SELF_TEST
+            kotlinx.coroutines.delay(600) // 等待页面布局与靶点坐标绑定
+            when (autoScenario) {
+                "connectivity" -> loopSelfTestViewModel.runConnectivity(context)
+                else -> loopSelfTestViewModel.runDryRun(context, autoScenario)
+            }
+            onAutoScenarioConsumed()
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text("Miracle", style = MaterialTheme.typography.headlineMedium)
+                when (tab) {
+                    MiracleTab.TASKS -> SessionTab(
+                        viewModel = sessionViewModel,
+                        onRequestProjection = onRequestProjection,
+                        onOpenSettings = { tab = MiracleTab.SETTINGS },
+                    )
+
+                    MiracleTab.SELF_TEST -> {
+                        SmokeCard(state = smokeViewModel.state.collectAsStateWithLifecycle().value, onRun = smokeViewModel::runSelfTest)
+                        CaptureCard(
+                            state = captureViewModel.state.collectAsStateWithLifecycle().value,
+                            frames = captureViewModel.frames.collectAsStateWithLifecycle().value,
+                            onStart = onRequestProjection,
+                        )
+                        InputCard(viewModel = inputViewModel)
+                        LoopSelfTestCard(
+                            viewModel = loopSelfTestViewModel,
+                            onRequestProjection = onRequestProjection,
+                        )
+                    }
+
+                    MiracleTab.SETTINGS -> SettingsScreen(viewModel = settingsViewModel)
+                }
+            }
+            NavigationBar {
+                MiracleTab.entries.forEach { item ->
+                    NavigationBarItem(
+                        selected = tab == item,
+                        onClick = {
+                            tab = item
+                            if (item == MiracleTab.TASKS) {
+                                sessionViewModel.refreshGate(context)
+                            }
+                        },
+                        icon = {},
+                        label = { Text(item.label) },
+                    )
+                }
+            }
+        }
+        // 全局确认对话框宿主（任意页面可呈现）。
+        ConfirmationHost(viewModel = sessionViewModel)
     }
 }
 
@@ -301,28 +425,6 @@ private fun HostBridge.CapturedFrame.toBitmap(): Bitmap {
     return bitmap
 }
 
-@Composable
-private fun StatusLine(ok: Boolean, title: String, detail: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            (if (ok) "✅ " else "⛔ ") + title,
-            style = MaterialTheme.typography.titleMedium,
-            color = if (ok) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
-        )
-        if (detail.isNotEmpty()) {
-            Text(detail, style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-@Composable
-private fun KeyValue(key: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(key, style = MaterialTheme.typography.bodySmall)
-        Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun InputCard(viewModel: InputViewModel) {
@@ -346,7 +448,7 @@ private fun InputCard(viewModel: InputViewModel) {
     val fieldFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
 
     // type 步骤的确定性聚焦辅助（见 InputViewModel.requestFieldFocus 文档）。
-    androidx.compose.runtime.DisposableEffect(Unit) {
+    DisposableEffect(Unit) {
         viewModel.requestFieldFocus = {
             // 未附着时 requestFocus 抛 IllegalStateException，由调用方捕获记录。
             fieldFocusRequester.requestFocus()
@@ -523,25 +625,5 @@ private fun InputCard(viewModel: InputViewModel) {
                 Text(if (state is InputState.Done) "再次自检" else "运行输入自检")
             }
         }
-    }
-}
-
-@Composable
-private fun PlaceholderCard() {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            "闭环 AgentLoop 与模型调用：P3 交付\n悬浮球：P3 交付",
-            modifier = Modifier.padding(16.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun MiracleAppPreview() {
-    MaterialTheme {
-        MiracleApp(modifier = Modifier.padding(20.dp))
     }
 }

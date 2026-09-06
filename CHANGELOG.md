@@ -2,6 +2,81 @@
 
 本文件记录版本级变化（工程规范 §10.5）。格式遵循 Keep a Changelog；版本号与 Git tag 对应。
 
+## [未发布] P3
+
+### 新增
+
+- 闭环运行时（`loop_runtime.cpp`）：mira AgentLoop 全链组装（Executor/AndroidHostAdapter/
+  ModelGateway/OpenAiCompatibleProvider/SimpleAdmissionGate/MemoryEventStore/
+  ModelDoneVerifier）；`AgentLoop::run` 经 `submit_cancellable` 协作取消提交；
+  takeover ＝ admission 失效 → 取消 → `interrupt()`（RELEASE_ALL）→ 确认失效；关闭按
+  §17.2 顺序有界排空。
+- 模型传输（宿主实现公共 `IHttpTransport`，MIR-20260906-006 缓解）：C++ 薄适配（封送 +
+  50ms 协作轮询 + 取消 disconnect 通知 + 容量 8）+ Kotlin `HttpURLConnection` HTTPS 执行
+  （https-only、私有/回环/链路本地地址静态与 DNS 双重复核、响应字节上限、恰好一次回流）；
+  方言映射/schema 校验/预算仍由 mira 完成。
+- 模型连通性自检：文本-only 决策请求（无 ImagePart，图像路径受 MIR-20260906-007 阻断）
+  经真实端点验证 transport→provider→gateway→decision 解析全链。
+- R3 确认协议（DEC-004，mira `ConfirmationAuthority` 为协议权威）：dispatch_input 受理后
+  准入询问（目标关键词/敏感应用+type 策略表，默认从严）；挑战绑定动作 digest+nonce+
+  task/environment epoch，60s 到期，consume 即失效；放行按停放参数派发，拒绝/到期/取消按
+  REJECTED/CANCELLED(side=0) 结算；release_all 永不确认。
+- 同意与告知：首启披露（可重置复验）、SessionGate 准入（披露+无障碍/投影/悬浮窗/通知+
+  配置完整性，缺项逐项引导）、R3 确认对话框宿主（倒计时/摘要/单次授权）。
+- 配置与凭据：设置页（端点/前缀/模型/方言/步数上限）；API key 经 AndroidKeyStore
+  AES-256-GCM 加密落 filesDir（JVM 可注入引擎已单测；AndroidKeyStore 版真机验证）。
+- 提供商预设（P3 补充需求）：设置页内置主流 OpenAI 兼容提供商目录（OpenAI/DeepSeek/
+  智谱 GLM/Moonshot Kimi/阿里云百炼 Qwen/OpenRouter/MiniMax/SiliconFlow），一键套用
+  端点/前缀/方言/模型建议值，仅需填写 API key；mira 公共 API 无提供商注册表——
+  MiniMax/SiliconFlow 取自 mira docs/model_provider 上游在用配置，其余按各厂商公开
+  兼容端点配置（Configured 级），互操作以连通性自检为准；上游配置凭据不入本仓库。
+- 双前端：任务台（新目标/会话卡/时间线/停止/接管）、设置页、Onboarding 引导卡、
+  底部三页导航（任务/自检/设置）；悬浮球（状态环相位映射/拖动/单击展开 Compose 面板/
+  长按 ≥600ms takeover）+ 常驻通知停止/接管 action 与状态文案联动。
+- P3 自检：干跑四场景（① 完整闭环 tap→tap→done ② 步数上限 ③ 中途取消 ④ R3 确认），
+  脚本化决策 + 真实 observe/act，自身 UI 靶点副作用断言。
+- 上游台账：`MIR-20260906-006`（安装包未导出传输头文件）、`MIR-20260906-007`（loop
+  图像 artifact 对真实 VLM 不可消费——真实任务验收阻断项）。
+- mira lock 升级（独立变更，`16e419e` → `cbed6ad`）：采纳上游两轮反馈修复
+  （PR #16/#17，DEC-012/013），MIR-001/003/004/005/006/007 关闭（MIR-002 仍 Open）；
+  宿主编码链路落地（Kotlin 截屏同步 PNG 编码 → 原始字节 sha256 键登记 → 注入
+  `HostFrameStore` 把原始帧重新发布为 `image/png` 工件 → `StoreArtifactSource` 供
+  wire 回读），真实 VLM 闭环图像路径解除阻断（真机取证待补跑）；`inputTestDispatch`
+  adapter 路径接通 `InputEvent.duration_ms`；`loopClose` 修复 scripted 模式空指针。
+
+### 变更
+
+- 主 GUI 由单列自检页改为底部三页导航（任务/自检/设置），P0–P2 自检卡保留于自检页。
+- `AgentForegroundService`：通知增加停止/接管 action、文案随会话状态联动；悬浮球随
+  服务生命周期显示（v1）。
+
+### 修复
+
+- P1 环境自检停留"正在执行环境自检…"不呈现结果（用户报告：整屏授权后录屏指示出现、
+  两帧已输出）：根因为 UI 状态机搁浅——自检启动守卫进程级一次性而结果状态按
+  ViewModel 实例私有，进程内第二次授权（"再次自检"）置 Running 后无完成方。自检
+  状态机重构为进程级 `CaptureSelfTestCoordinator`（状态共享、在途去重、重跑折叠），
+  "再次自检"重新执行 native 自检，Activity 重建实例投影同一状态流；连带修复前台
+  服务对携带新授权数据的重复 start 静默丢弃（改为拆旧建新重建投影会话，含旧投影
+  迟到 onStop 守卫），以及截屏取帧与像素拷贝并入同一 frameLock 临界区（消除整屏
+  帧翻动下持帧被 listener 关闭的竞争）。详见 docs/plans/p1-screen-capture.md
+  2026-09-06 验证记录；真机复验通过（与 mira `cbed6ad` 升级构建合并验证：单应用
+  首跑 bind→结果 ~450ms、同进程"再次自检"换整屏 epoch=2 通过、重启后整屏 ~1.0s、
+  FATAL/ANR=0、force-stop 干净退出、重启后 Idle 无搁浅）。
+
+### 验证
+
+- 本地门禁：`assembleDebug lintDebug testDebugUnitTest` 全绿（单测 54/54，新增 34，含提供商预设 6）；
+  native 目标 NDK 独立编译零警告（-Wall -Wextra -Wpedantic）；自研代码零线程创建、
+  无 GlobalScope（grep 复核）。
+- P1 自检修复门禁：`testDebugUnitTest assembleDebug lintDebug` 全绿（新增
+  `CaptureSelfTestCoordinatorTest` 8 例：首跑/重跑/在途折叠/拒绝/补跑/服务超时/
+  失败负载/异常路径，合计 62/62）。
+- 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接）：真实任务
+  图像路径阻断已随 mira `cbed6ad` lock 升级解除，补跑条件见 docs/plans/p3-loop-mvp.md；
+  本地门禁（lock 升级后重跑）：`assembleDebug lintDebug testDebugUnitTest` 全绿
+  （62/62），native 针对新安装前缀零警告重编译，零线程创建/无 GlobalScope grep 通过。
+
 ## [未发布]
 
 ### 新增
@@ -109,3 +184,6 @@
   焦点重试窗口 500ms→2s（有界）；焦点子树内有界解析可编辑节点（覆盖容器聚焦
   的 Compose 无障碍暴露差异）；自检页 type 前确定性聚焦辅助。真机复验：用户式
   滚动布局与 Done 后布局均 ✅（type=Completed、零告警、home 达 launcher）。
+- 上游反馈：台账 5 条 MIR 条目、`leases_released` 统计观察项（自 MIR-004 备注
+  拆出）与 android-host-abi.md 证据回填拟稿已提交 mira issue #7–#13；台账与
+  拟稿回填对应 issue 链接（提交前证据均经 mira `16e419e` 源码复核）。

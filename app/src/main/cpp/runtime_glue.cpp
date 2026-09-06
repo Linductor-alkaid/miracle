@@ -13,6 +13,7 @@
 //  - 本文件不创建任何线程；mira Executor 由本层唯一持有并按 DEC-001 §17.2 顺序关闭。
 #include "host_abi_impl.hpp"
 #include "host_jni.hpp"
+#include "loop_runtime.hpp"
 
 #include <mira/adapters/android/android_host_adapter.hpp>
 #include <mira/core_contracts.hpp>
@@ -651,9 +652,8 @@ std::unique_ptr<InputTestSession> g_input_test_session;
 std::string run_input_test_dispatch(std::int32_t kind, double x, double y, double x2, double y2,
                                     const std::string &text, std::int32_t duration_ms,
                                     std::int32_t timeout_ms) {
-    // mira InputSequence 不携带时长（payload 仅坐标/文本）；duration_ms 保留在 JNI
-    // 签名中以兼容探针复用，经 adapter 路径的手势使用宿主默认时长。
-    (void)duration_ms;
+    // mira InputEvent 自 cbed6ad 起携带 duration_ms（MIR-20260906-005 关闭）：
+    // adapter 映射到 ABI duration_ms，超宿主 max_gesture_duration_ms 由 adapter 拒绝。
     InputTestSession *session = nullptr;
     {
         std::lock_guard lock(g_input_test_mutex);
@@ -696,7 +696,11 @@ std::string run_input_test_dispatch(std::int32_t kind, double x, double y, doubl
     }
 
     mira::InputSequence sequence;
-    sequence.events.push_back(mira::InputEvent{kind_name, payload});
+    mira::InputEvent event{kind_name, payload};
+    if (duration_ms > 0) {
+        event.duration_ms = static_cast<std::uint32_t>(duration_ms);
+    }
+    sequence.events.push_back(std::move(event));
     mira::OperationContext context;
     context.operation = mira::OperationId::generate();
     context.started_at = mira::Timestamp::now();
@@ -764,11 +768,13 @@ jstring JNICALL native_environment_self_test(JNIEnv *env, jclass /*clazz*/) {
 
 void JNICALL native_complete_frame(JNIEnv *env, jclass /*clazz*/, jlong correlation, jint ok,
                                    jint width, jint height, jint rotation, jbyteArray pixels,
-                                   jlong begin_ns, jlong end_ns, jint err_code) {
+                                   jbyteArray encoded, jlong begin_ns, jlong end_ns,
+                                   jint err_code) {
     try {
         if (pixels == nullptr) {
             (void)miracle_host_complete_frame(
-                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, 0, 0,
+                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, nullptr, 0,
+                0, 0,
                 err_code != 0 ? static_cast<MiraHostStatus>(err_code) : MIRA_HOST_ERR_UNAVAILABLE);
             return;
         }
@@ -778,15 +784,26 @@ void JNICALL native_complete_frame(JNIEnv *env, jclass /*clazz*/, jlong correlat
             env->GetByteArrayElements(pixels, &is_copy));
         if (bytes == nullptr) {
             (void)miracle_host_complete_frame(
-                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, 0, 0,
-                MIRA_HOST_ERR_CAPACITY);
+                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, nullptr, 0,
+                0, 0, MIRA_HOST_ERR_CAPACITY);
             return;
+        }
+        // 编码载荷（PNG）：拷贝后传入（登记方在 host_abi_impl 内复制，此处出参即可）。
+        std::vector<std::uint8_t> encoded_bytes;
+        if (encoded != nullptr) {
+            const jsize encoded_length = env->GetArrayLength(encoded);
+            if (encoded_length > 0) {
+                encoded_bytes.resize(static_cast<std::size_t>(encoded_length));
+                env->GetByteArrayRegion(encoded, 0, encoded_length,
+                                        reinterpret_cast<jbyte *>(encoded_bytes.data()));
+            }
         }
         const MiraHostStatus status = miracle_host_complete_frame(
             static_cast<std::uint64_t>(correlation), ok != 0, static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height), static_cast<std::uint32_t>(rotation), bytes,
-            static_cast<std::uint64_t>(length), static_cast<std::uint64_t>(begin_ns),
-            static_cast<std::uint64_t>(end_ns),
+            static_cast<std::uint64_t>(length),
+            encoded_bytes.empty() ? nullptr : encoded_bytes.data(), encoded_bytes.size(),
+            static_cast<std::uint64_t>(begin_ns), static_cast<std::uint64_t>(end_ns),
             err_code != 0 ? static_cast<MiraHostStatus>(err_code) : MIRA_HOST_ERR_UNAVAILABLE);
         env->ReleaseByteArrayElements(pixels, reinterpret_cast<jbyte *>(const_cast<std::uint8_t *>(bytes)),
                                       JNI_ABORT);
@@ -954,13 +971,190 @@ jstring JNICALL native_input_test_close(JNIEnv *env, jclass /*clazz*/) {
     }
 }
 
+// ---- P3 闭环运行时（loop_runtime 转发；异常不穿越 JNI） ----
+
+jint JNICALL native_loop_open(JNIEnv *env, jclass /*clazz*/, jstring config) {
+    try {
+        if (config == nullptr) {
+            return -4;
+        }
+        const char *chars = env->GetStringUTFChars(config, nullptr);
+        if (chars == nullptr) {
+            return -5;
+        }
+        const std::string config_json = chars;
+        env->ReleaseStringUTFChars(config, chars);
+        return miracle::bridge::loop::open(config_json);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "loop open exception");
+        return -5;
+    }
+}
+
+jint JNICALL native_loop_submit(JNIEnv *env, jclass /*clazz*/, jstring goal, jint max_steps) {
+    try {
+        if (goal == nullptr) {
+            return -1;
+        }
+        const char *chars = env->GetStringUTFChars(goal, nullptr);
+        if (chars == nullptr) {
+            return -2;
+        }
+        const std::string goal_text = chars;
+        env->ReleaseStringUTFChars(goal, chars);
+        return miracle::bridge::loop::submit(goal_text, max_steps);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "loop submit exception");
+        return -2;
+    }
+}
+
+jint JNICALL native_loop_cancel(JNIEnv * /*env*/, jclass /*clazz*/) {
+    try {
+        return miracle::bridge::loop::cancel();
+    } catch (...) {
+        return -2;
+    }
+}
+
+jint JNICALL native_loop_takeover(JNIEnv * /*env*/, jclass /*clazz*/) {
+    try {
+        return miracle::bridge::loop::takeover();
+    } catch (...) {
+        return -2;
+    }
+}
+
+jstring JNICALL native_loop_close(JNIEnv *env, jclass /*clazz*/) {
+    try {
+        return make_string(env, miracle::bridge::loop::close());
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "loop close exception: %s", error.what());
+        return make_string(env, "{\"ok\":false,\"error\":\"native exception\"}");
+    } catch (...) {
+        return make_string(env, "{\"ok\":false,\"error\":\"unknown native exception\"}");
+    }
+}
+
+jstring JNICALL native_loop_state(JNIEnv *env, jclass /*clazz*/) {
+    try {
+        return make_string(env, miracle::bridge::loop::state_json());
+    } catch (...) {
+        return make_string(env, "{\"state\":\"closed\"}");
+    }
+}
+
+jstring JNICALL native_model_connectivity(JNIEnv *env, jclass /*clazz*/, jstring config) {
+    try {
+        if (config == nullptr) {
+            return make_string(env, "{\"ok\":false,\"stage\":\"config\",\"error\":\"null\"}");
+        }
+        const char *chars = env->GetStringUTFChars(config, nullptr);
+        if (chars == nullptr) {
+            return make_string(env, "{\"ok\":false,\"stage\":\"config\",\"error\":\"jni\"}");
+        }
+        const std::string config_json = chars;
+        env->ReleaseStringUTFChars(config, chars);
+        const std::string result = miracle::bridge::loop::connectivity(config_json);
+        __android_log_print(ANDROID_LOG_INFO, kLogTag, "connectivity: %s", result.c_str());
+        return make_string(env, result);
+    } catch (const std::exception &error) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "connectivity exception: %s",
+                            error.what());
+        return make_string(env, "{\"ok\":false,\"stage\":\"exception\",\"error\":\"native\"}");
+    } catch (...) {
+        return make_string(env, "{\"ok\":false,\"stage\":\"exception\",\"error\":\"unknown\"}");
+    }
+}
+
+jint JNICALL native_consent_resolve(JNIEnv *env, jclass /*clazz*/, jstring challenge,
+                                    jstring nonce, jboolean approve) {
+    try {
+        if (challenge == nullptr || nonce == nullptr) {
+            return 2;
+        }
+        const char *challenge_chars = env->GetStringUTFChars(challenge, nullptr);
+        const char *nonce_chars = env->GetStringUTFChars(nonce, nullptr);
+        if (challenge_chars == nullptr || nonce_chars == nullptr) {
+            if (challenge_chars != nullptr) {
+                env->ReleaseStringUTFChars(challenge, challenge_chars);
+            }
+            if (nonce_chars != nullptr) {
+                env->ReleaseStringUTFChars(nonce, nonce_chars);
+            }
+            return 2;
+        }
+        const std::string challenge_hex = challenge_chars;
+        const std::string nonce_hex = nonce_chars;
+        env->ReleaseStringUTFChars(challenge, challenge_chars);
+        env->ReleaseStringUTFChars(nonce, nonce_chars);
+        const std::int32_t outcome =
+            miracle::bridge::loop::resolve_confirmation(challenge_hex, nonce_hex,
+                                                        approve == JNI_TRUE);
+        if (outcome != 0 && outcome != 1) {
+            return outcome; // 2=未找到 -3=校验失败（不派发、不结算）
+        }
+        // 放行/拒绝落到停放操作：派发平台或结算 REJECTED(side=0)。
+        const std::uint64_t correlation =
+            outcome == 0 ? miracle::bridge::loop::confirmation_correlation(challenge_hex) : 0;
+        if (outcome == 0) {
+            if (correlation == 0) {
+                return 2; // 已被取消/失效（确认 settlement 已通知 Kotlin）
+            }
+            const MiraHostStatus released = miracle_host_confirm_release(correlation, true);
+            return released == MIRA_HOST_OK ? 0 : -4;
+        }
+        // 拒绝：停放表中的 correlation 需要查询（尚未清除前）。
+        const std::uint64_t denied =
+            miracle::bridge::loop::confirmation_correlation(challenge_hex);
+        if (denied != 0) {
+            (void)miracle_host_confirm_release(denied, false);
+        }
+        return 1;
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "consent resolve exception");
+        return -5;
+    }
+}
+
+void JNICALL native_http_exchange_complete(JNIEnv *env, jclass /*clazz*/, jlong exchange_id,
+                                           jint status, jstring headers, jbyteArray body) {
+    try {
+        std::string headers_json;
+        if (headers != nullptr) {
+            const char *chars = env->GetStringUTFChars(headers, nullptr);
+            if (chars != nullptr) {
+                headers_json = chars;
+                env->ReleaseStringUTFChars(headers, chars);
+            } else {
+                env->ExceptionClear();
+            }
+        }
+        std::string body_bytes;
+        if (body != nullptr) {
+            const jsize length = env->GetArrayLength(body);
+            body_bytes.resize(static_cast<std::size_t>(length));
+            if (length > 0) {
+                env->GetByteArrayRegion(body, 0, length,
+                                        reinterpret_cast<jbyte *>(body_bytes.data()));
+            }
+        }
+        miracle::bridge::loop::complete_http_exchange(static_cast<std::uint64_t>(exchange_id),
+                                                      status, headers_json, body_bytes);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                            "http exchange complete exception (id %lld)",
+                            static_cast<long long>(exchange_id));
+    }
+}
+
 const JNINativeMethod kNativeBridgeMethods[] = {
     {"runtimeSelfTest", "()Ljava/lang/String;",
      reinterpret_cast<void *>(&native_runtime_self_test)},
 };
 
 const JNINativeMethod kHostBridgeMethods[] = {
-    {"nativeCompleteFrame", "(JIIII[BJJI)V",
+    {"nativeCompleteFrame", "(JIIII[B[BJJI)V",
      reinterpret_cast<void *>(&native_complete_frame)},
     {"nativeCompleteInput", "(JIII)V", reinterpret_cast<void *>(&native_complete_input)},
     {"nativeNotifyEpochChanged", "()V", reinterpret_cast<void *>(&native_notify_epoch_changed)},
@@ -974,6 +1168,18 @@ const JNINativeMethod kHostBridgeMethods[] = {
     {"inputTestInterrupt", "()I", reinterpret_cast<void *>(&native_input_test_interrupt)},
     {"inputTestClose", "()Ljava/lang/String;",
      reinterpret_cast<void *>(&native_input_test_close)},
+    {"loopOpen", "(Ljava/lang/String;)I", reinterpret_cast<void *>(&native_loop_open)},
+    {"loopSubmit", "(Ljava/lang/String;I)I", reinterpret_cast<void *>(&native_loop_submit)},
+    {"loopCancel", "()I", reinterpret_cast<void *>(&native_loop_cancel)},
+    {"loopTakeover", "()I", reinterpret_cast<void *>(&native_loop_takeover)},
+    {"loopClose", "()Ljava/lang/String;", reinterpret_cast<void *>(&native_loop_close)},
+    {"loopState", "()Ljava/lang/String;", reinterpret_cast<void *>(&native_loop_state)},
+    {"modelConnectivityTest", "(Ljava/lang/String;)Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_model_connectivity)},
+    {"consentResolve", "(Ljava/lang/String;Ljava/lang/String;Z)I",
+     reinterpret_cast<void *>(&native_consent_resolve)},
+    {"nativeHttpExchangeComplete", "(JILjava/lang/String;[B)V",
+     reinterpret_cast<void *>(&native_http_exchange_complete)},
 };
 
 } // namespace

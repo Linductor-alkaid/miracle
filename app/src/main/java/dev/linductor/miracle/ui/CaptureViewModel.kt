@@ -2,24 +2,22 @@ package dev.linductor.miracle.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import dev.linductor.miracle.host.AgentForegroundService
 import dev.linductor.miracle.host.HostBridge
 import dev.linductor.miracle.runtime.EnvSelfTestResult
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * P1 截屏自检页状态（UDF）。
  *
  * 触发链：Activity 直接消费授权结果并启动宿主服务（consent 一次性，不能等待）；
- * 自检由"服务进入 Bound"事件驱动，与 Activity/ViewModel 重建解耦——进程内只执行
- * 一次（[selfTestLaunched]），重建后的 VM 订阅同一状态流呈现结果。
+ * 自检由"服务进入 Bound"事件驱动，与 Activity/ViewModel 重建解耦。状态机收敛在
+ * 进程级 [CaptureSelfTestCoordinator]（本 VM 仅作薄委托），任意实例投影同一状态。
  */
 sealed interface CaptureState {
     data object Idle : CaptureState
@@ -32,75 +30,56 @@ sealed interface CaptureState {
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
 
-    companion object {
-        @Volatile
-        private var selfTestLaunched = false
-    }
+    private val coordinator: CaptureSelfTestCoordinator = defaultCoordinator()
 
-    private val _state = MutableStateFlow<CaptureState>(CaptureState.Idle)
-    val state: StateFlow<CaptureState> = _state.asStateFlow()
+    val state: StateFlow<CaptureState> = coordinator.state
 
     val frames = HostBridge.frames
 
     init {
         // 服务已绑定（例如 Activity 重建后）也能呈现/执行自检。
         if (AgentForegroundService.state.value == AgentForegroundService.HostState.Bound) {
-            maybeLaunchSelfTest()
+            coordinator.onServiceBound()
         }
     }
 
-    fun begin() {
-        if (_state.value is CaptureState.Requesting || _state.value is CaptureState.Running) {
-            return
-        }
-        _state.value = CaptureState.Requesting
-    }
+    fun begin() = coordinator.begin()
 
     /** 授权被拒绝。 */
-    fun markDenied() {
-        if (_state.value is CaptureState.Requesting) {
-            _state.value = CaptureState.PermissionDenied
-        }
-    }
+    fun markDenied() = coordinator.markDenied()
 
     /** 授权结果已由 Activity 直接消费（服务已启动）。 */
-    fun markConsumed() {
-        if (_state.value is CaptureState.Requesting) {
-            _state.value = CaptureState.Running
-        }
-        maybeLaunchSelfTest()
-    }
+    fun markConsumed() = coordinator.markConsumed()
 
-    private fun maybeLaunchSelfTest() {
-        if (selfTestLaunched) {
-            if (_state.value is CaptureState.Idle) {
-                _state.value = CaptureState.Running
-            }
-            return
+    private fun defaultCoordinator(): CaptureSelfTestCoordinator =
+        Companion.coordinator ?: synchronized(Companion) {
+            Companion.coordinator ?: CaptureSelfTestCoordinator(
+                // 协调器自有单例作用域：任务有限（单在途 + 折叠重跑），生命周期为
+                // 进程级，与所投影状态的进程级语义一致。
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                awaitServiceBound = { timeoutMs ->
+                    withTimeoutOrNull(timeoutMs) {
+                        AgentForegroundService.state.first {
+                            it == AgentForegroundService.HostState.Bound
+                        }
+                    } != null
+                },
+                environmentSelfTest = {
+                    if (!HostBridge.ensureNative()) {
+                        NATIVE_UNAVAILABLE_PAYLOAD
+                    } else {
+                        HostBridge.environmentSelfTest()
+                    }
+                },
+                boundFailureMessage = { AgentForegroundService.stateMessage.value },
+            ).also { Companion.coordinator = it }
         }
-        selfTestLaunched = true
-        _state.value = CaptureState.Running
-        viewModelScope.launch(Dispatchers.Default) {
-            val bound = withTimeoutOrNull(15_000) {
-                AgentForegroundService.state.first { it == AgentForegroundService.HostState.Bound }
-            }
-            if (bound == null) {
-                _state.value = CaptureState.Failed(
-                    "service",
-                    AgentForegroundService.stateMessage.value.ifEmpty { "宿主服务未就绪" },
-                )
-                return@launch
-            }
-            val payload = HostBridge.environmentSelfTest()
-            val parsed = EnvSelfTestResult.parse(payload)
-            _state.value = if (parsed.ok) {
-                CaptureState.Done(parsed)
-            } else {
-                CaptureState.Failed(
-                    parsed.stage.ifEmpty { "observe" },
-                    parsed.error.ifEmpty { "未知失败" },
-                )
-            }
-        }
+
+    private companion object {
+        @Volatile
+        private var coordinator: CaptureSelfTestCoordinator? = null
+
+        private const val NATIVE_UNAVAILABLE_PAYLOAD =
+            """{"ok":false,"stage":"native","error":"native 库不可用"}"""
     }
 }

@@ -1,7 +1,7 @@
 # mira `android-host-abi.md` 证据回填拟稿（独立上游变更）
 
-> 状态：Draft（待提交至 mira 仓库；miracle 不代改上游）
-> 日期：2026-09-05
+> 状态：Draft（已以 mira issue [#13](https://github.com/Linductor-alkaid/mira/issues/13) 提交上游，待 mira 维护者审核落地；miracle 不代改上游）
+> 日期：2026-09-05（2026-09-06 反馈上游）
 > 依据：mira `16e419e0c5b3c634885d97aebe54bc0497b609c1` + miracle P1 实测
 
 本文件是提交给 mira 的证据回档内容建议，供维护者审核后落入 mira 仓库
@@ -27,9 +27,12 @@
 ## 建议登记的改进项
 
 - `AndroidHostAdapter` 内置 `MemoryArtifactStore` 容量（8MB）不可配置/不可注入
-  （miracle 台账 `MIR-20260905-004`）：真机一帧 6.4MB 时第二步 observe 即耗尽。
+  （miracle 台账 `MIR-20260905-004`，mira
+  [#10](https://github.com/Linductor-alkaid/mira/issues/10)）：真机一帧 6.4MB 时
+  第二步 observe 即耗尽。
 - bridge `leases_released` 统计口径与 observe 尾部 `lease.release()` 路径可能
-  脱节（同台账备注）。
+  脱节（同台账备注，mira
+  [#12](https://github.com/Linductor-alkaid/mira/issues/12)）。
 
 ## 关联
 

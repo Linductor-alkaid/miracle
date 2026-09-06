@@ -1,15 +1,27 @@
-// mira Android Host ABI v1 的宿主侧实现（P1：截屏路径可用，其余 fail-closed）。
+// mira Android Host ABI v1 的宿主侧实现（P1：截屏路径；P2：输入路径；P3：R3 确认门）。
 //
-// 语义对齐 host_abi.h 冻结契约与本仓库 P1 计划的"关键实现决策"：
+// 语义对齐 host_abi.h 冻结契约与本仓库 P1/P2/P3 计划的"关键实现决策"：
 //  - lease 内存由 native 拥有（malloc 拷贝），release() 释放并递减未决计数；
 //    stop 在 lease 未清零时有界等待后如实返回 EXECUTION_UNCERTAIN。
 //  - epoch 由 native 单调维护；notifyEpochChanged 递增并触发 capabilities 变化回调。
-//  - 能力快照诚实：仅截屏可用（RGBA8888/virtual display）；ui_tree 与输入 fail-closed。
+//  - 能力快照诚实；ui_tree fail-closed（MIR-20260905-001）。
 //  - exactly-once：操作注册表 erase 竞争决定终态归属；重复/未知/迟到完成计数并丢弃。
+//  - P3 R3 确认门（决策 5）：loop 会话活跃时，dispatch_input 受理后先问 Kotlin
+//    SessionGate；require_confirmation 的操作停放（不派发平台），challenge 经
+//    ConfirmationAuthority（loop_runtime）签发，用户响应放行/拒绝；到期与取消按
+//    REJECTED/CANCELLED(side=0) 结算。release_all 永不确认（安全原语）。
+//  - 粗相位信号（决策 4）：loop 会话活跃时 capture/dispatch 受理上投
+//    observing/acting；自检会话（loop 不活跃）不上投。
+//  - 帧编码登记（mira DEC-013 宿主编码路径）：宿主随帧产出 PNG 时以原始字节
+//    sha256 为键登记，注入 loop 的转码 store 在 commit 时重新发布为 image/png。
 //  - 本文件不创建线程；完成回调在完成线程直接调用，回调外不持有注册表锁。
 #include "host_jni.hpp"
+#include "loop_runtime.hpp"
+
+#include "frame_encoding.hpp"
 
 #include <mira/adapters/android/host_abi.h>
+#include <mira/event_store.hpp>
 
 #include <android/log.h>
 
@@ -21,11 +33,21 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+namespace miracle::bridge {
+
+FrameEncodingRegistry &frame_encoding_registry() {
+    static FrameEncodingRegistry registry;
+    return registry;
+}
+
+} // namespace miracle::bridge
 
 namespace {
 
@@ -384,6 +406,106 @@ bool claim_pending(MiraAndroidHostV1 *host, std::uint64_t correlation, CallbackV
     return true;
 }
 
+// ---- P3：R3 确认停放登记（确认期间操作已注册但不派发平台） ----
+
+struct ParkedConfirmation final {
+    std::int64_t deadline_ns = 0; // dispatch_input 内部约定：0=无超时 负=已过期 正=剩余ns
+    std::string events_json;
+};
+std::mutex g_parked_mutex;
+std::unordered_map<std::uint64_t, ParkedConfirmation> g_parked;
+
+// 会话准入询问：0=放行 1=需确认 2=拒绝（JNI 失败按拒绝，fail-closed）。
+int call_consent_check(const std::string &events_json) {
+    miracle::bridge::AttachedEnv attach;
+    JNIEnv *env = attach.env();
+    jclass bridge = miracle::bridge::host_bridge_class();
+    if (env == nullptr || bridge == nullptr) {
+        return 2;
+    }
+    jmethodID method = env->GetStaticMethodID(bridge, "consentCheckInput", "(Ljava/lang/String;)I");
+    if (method == nullptr) {
+        env->ExceptionClear();
+        return 2;
+    }
+    jstring payload = env->NewStringUTF(events_json.c_str());
+    if (payload == nullptr) {
+        env->ExceptionClear();
+        return 2;
+    }
+    const jint gate = env->CallStaticIntMethod(bridge, method, payload);
+    env->DeleteLocalRef(payload);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return 2;
+    }
+    return gate;
+}
+
+// 事件摘要（不含 type 文本内容；坐标为 [0,1] 规范值）。
+std::string summarize_input_events(const MiraHostInputRequestV1 *request) {
+    static const char *kNames[] = {"", "tap", "long_press", "swipe", "type",
+                                   "back", "home", "release_all"};
+    std::string summary;
+    char piece[96];
+    for (std::uint32_t i = 0; i < request->event_count && i < 4; ++i) {
+        const MiraHostInputEventV1 &event = request->events[i];
+        const char *name = event.kind <= 7 ? kNames[event.kind] : "?";
+        if (event.kind == MIRA_HOST_INPUT_TAP || event.kind == MIRA_HOST_INPUT_LONG_PRESS) {
+            std::snprintf(piece, sizeof(piece), "%s(%.2f,%.2f)", name, event.x, event.y);
+        } else if (event.kind == MIRA_HOST_INPUT_SWIPE) {
+            std::snprintf(piece, sizeof(piece), "%s(%.2f,%.2f→%.2f,%.2f)", name, event.x,
+                          event.y, event.x2, event.y2);
+        } else {
+            std::snprintf(piece, sizeof(piece), "%s", name);
+        }
+        if (!summary.empty()) {
+            summary += ",";
+        }
+        summary += piece;
+    }
+    return summary;
+}
+
+// 结算超期停放操作（REJECTED side=0）；在 dispatch/cancel 入口与确认回流处调用。
+void settle_expired_parked() {
+    const std::string expired = miracle::bridge::loop::expire_confirmations();
+    if (expired == "[]") {
+        return;
+    }
+    // 解析 JSON 数组（loop_runtime 生成的简单数字数组）。
+    std::vector<std::uint64_t> correlations;
+    std::size_t pos = 0;
+    while (pos < expired.size()) {
+        const std::size_t begin = expired.find_first_of("0123456789", pos);
+        if (begin == std::string::npos) {
+            break;
+        }
+        const std::size_t end = expired.find_first_not_of("0123456789", begin);
+        correlations.push_back(std::strtoull(expired.substr(begin, end - begin).c_str(),
+                                             nullptr, 10));
+        pos = end == std::string::npos ? expired.size() : end;
+    }
+    MiraAndroidHostV1 *host = nullptr;
+    {
+        std::lock_guard active_lock(g_active_mutex);
+        host = g_active_host;
+    }
+    for (const std::uint64_t correlation : correlations) {
+        {
+            std::lock_guard parked_lock(g_parked_mutex);
+            g_parked.erase(correlation);
+        }
+        if (host != nullptr) {
+            CallbackView view;
+            if (claim_pending(host, correlation, view)) {
+                deliver_input_result(view, correlation, MIRA_HOST_ERR_PERMISSION_DENIED,
+                                     MIRA_HOST_INPUT_RECEIPT_REJECTED, 0);
+            }
+        }
+    }
+}
+
 } // namespace
 
 extern "C" {
@@ -502,6 +624,11 @@ MiraHostStatus mira_android_host_stop_v1(MiraAndroidHostV1 *host) {
         if (g_active_host == host) {
             g_active_host = nullptr;
         }
+    }
+    // P3：停放（待确认）登记随会话终止清空；对应操作已由上方排空路径结算。
+    {
+        std::lock_guard parked_lock(g_parked_mutex);
+        g_parked.clear();
     }
     // 有界等待 lease 清零（最长 500ms），之后如实报告不确定。
     for (int attempt = 0; attempt < 50 && host->outstanding_leases.load() > 0; ++attempt) {
@@ -646,6 +773,9 @@ MiraHostStatus mira_android_host_capture_frame_v1(MiraAndroidHostV1 *host,
     if (out_operation != nullptr) {
         *out_operation = request->correlation;
     }
+    if (miracle::bridge::loop::active()) {
+        miracle::bridge::loop::emit_phase_signal("observing");
+    }
     // mira 的 deadline_ns 是 steady_clock 绝对时刻；转换为剩余时长（ns）交给
     // Kotlin 协程做相对超时，并收紧上限为 6s（mira 侧观察 deadline 通常 10s，
     // 留出余量让失败以明确错误状态而非宿主超时结算）。
@@ -751,6 +881,51 @@ MiraHostStatus mira_android_host_dispatch_input_v1(MiraAndroidHostV1 *host,
                        : -1;
     }
     const std::string events_json = build_input_events_json(request);
+
+    // P3 R3 确认门（决策 5）：仅 loop 会话活跃时生效；release_all 永不确认。
+    const bool release_only =
+        request->event_count == 1 && request->events[0].kind == MIRA_HOST_INPUT_RELEASE_ALL;
+    if (!release_only && miracle::bridge::loop::active()) {
+        settle_expired_parked();
+        const int gate = call_consent_check(events_json);
+        if (gate == 2) {
+            CallbackView view;
+            if (claim_pending(host, request->correlation, view)) {
+                deliver_input_result(view, request->correlation, MIRA_HOST_ERR_PERMISSION_DENIED,
+                                     MIRA_HOST_INPUT_RECEIPT_REJECTED, 0);
+            }
+            return MIRA_HOST_OK;
+        }
+        if (gate == 1) {
+            const std::string digest = mira::digest_string(events_json).to_string();
+            const std::string summary = summarize_input_events(request);
+            const std::string challenge = miracle::bridge::loop::begin_confirmation(
+                request->correlation, events_json, digest, summary,
+                "R3 策略：会话目标或动作需要动作级确认");
+            if (challenge.empty()) {
+                CallbackView view;
+                if (claim_pending(host, request->correlation, view)) {
+                    deliver_input_result(view, request->correlation,
+                                         MIRA_HOST_ERR_PERMISSION_DENIED,
+                                         MIRA_HOST_INPUT_RECEIPT_REJECTED, 0);
+                }
+                return MIRA_HOST_OK;
+            }
+            // 停放：操作已注册、不派发平台；用户响应（miracle_host_confirm_release）
+            // 或到期/取消路径结算。
+            {
+                std::lock_guard parked_lock(g_parked_mutex);
+                g_parked[request->correlation] =
+                    ParkedConfirmation{deadline, events_json};
+            }
+            return MIRA_HOST_OK;
+        }
+        // gate == 0（放行）：继续派发。
+    }
+
+    if (miracle::bridge::loop::active()) {
+        miracle::bridge::loop::emit_phase_signal("acting");
+    }
     const int accepted = call_dispatch_input(request->correlation, deadline, events_json);
     if (accepted != 0) {
         // 快速失败路径：竞争结算，赢家负责恰好一次终态回调。
@@ -770,6 +945,19 @@ MiraHostStatus mira_android_host_cancel_operation_v1(MiraAndroidHostV1 *host,
                                                      std::uint64_t operation) {
     if (host == nullptr || operation == 0) {
         return MIRA_HOST_ERR_INVALID_ARGUMENT;
+    }
+    // P3：停放中（待确认）的操作取消→直接结算 CANCELLED(side=0)（未触碰平台）。
+    {
+        std::lock_guard parked_lock(g_parked_mutex);
+        if (g_parked.erase(operation) > 0) {
+            host->cancelled_ops += 1;
+            CallbackView view;
+            if (claim_pending(host, operation, view)) {
+                deliver_input_result(view, operation, MIRA_HOST_ERR_CANCELLED,
+                                     MIRA_HOST_INPUT_RECEIPT_UNKNOWN, 0);
+            }
+            return MIRA_HOST_OK;
+        }
     }
     std::uint32_t kind = 0;
     bool sync_settle = false;
@@ -803,6 +991,58 @@ MiraHostStatus mira_android_host_cancel_operation_v1(MiraAndroidHostV1 *host,
 }
 
 // ---- Kotlin 完成入口与 epoch 通知（HostBridge 经 JNI 调用） ----
+
+// P3 确认回流：放行→按停放参数派发平台；拒绝→结算 REJECTED(side=0)。
+// 返回 MIRA_HOST_OK＝已处理（派发或结算）。
+MiraHostStatus miracle_host_confirm_release(std::uint64_t correlation, bool allow) {
+    MiraAndroidHostV1 *host = nullptr;
+    {
+        std::lock_guard active_lock(g_active_mutex);
+        host = g_active_host;
+    }
+    ParkedConfirmation parked;
+    {
+        std::lock_guard parked_lock(g_parked_mutex);
+        const auto found = g_parked.find(correlation);
+        if (found == g_parked.end()) {
+            return MIRA_HOST_ERR_INVALID_ARGUMENT; // 未停放（重复回流/已失效）
+        }
+        parked = found->second;
+        if (!allow) {
+            g_parked.erase(found);
+        }
+    }
+    if (!allow) {
+        if (host != nullptr) {
+            CallbackView view;
+            if (claim_pending(host, correlation, view)) {
+                deliver_input_result(view, correlation, MIRA_HOST_ERR_PERMISSION_DENIED,
+                                     MIRA_HOST_INPUT_RECEIPT_REJECTED, 0);
+            }
+        }
+        return MIRA_HOST_OK;
+    }
+    // 放行：从停放表移除并派发（Kotlin 完成路径结算）。
+    {
+        std::lock_guard parked_lock(g_parked_mutex);
+        g_parked.erase(correlation);
+    }
+    if (host == nullptr) {
+        return MIRA_HOST_ERR_INVALID_STATE;
+    }
+    miracle::bridge::loop::emit_phase_signal("acting");
+    const int accepted = call_dispatch_input(correlation, parked.deadline_ns,
+                                             parked.events_json);
+    if (accepted != 0) {
+        CallbackView view;
+        if (claim_pending(host, correlation, view)) {
+            const MiraHostStatus status =
+                accepted == 1 ? MIRA_HOST_ERR_PERMISSION_DENIED : MIRA_HOST_ERR_UNAVAILABLE;
+            deliver_input_result(view, correlation, status, MIRA_HOST_INPUT_RECEIPT_UNKNOWN, 0);
+        }
+    }
+    return MIRA_HOST_OK;
+}
 
 void miracle_host_debug_stats_json(std::string &out) {
     const HostDebugStats stats = host_debug_stats();
@@ -850,13 +1090,17 @@ void miracle_host_notify_epoch_changed() {
 
 } // extern "C"
 
-// 帧完成：Kotlin 携带拷贝后的 RGBA 像素与元数据。由 HostBridge.nativeCompleteFrame
-// （见 runtime_glue.cpp）在 JVM 线程调用。声明见 host_abi_impl.hpp。
+// 帧完成：Kotlin 携带拷贝后的 RGBA 像素与元数据（encoded 为同步编码的 PNG 载荷，
+// 可空）。由 HostBridge.nativeCompleteFrame（见 runtime_glue.cpp）在 JVM 线程调用。
+// 声明见 host_abi_impl.hpp。
 extern "C" MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation, bool ok,
                                                        std::uint32_t width, std::uint32_t height,
                                                        std::uint32_t rotation,
                                                        const std::uint8_t *pixels,
-                                                       std::uint64_t size, std::uint64_t begin_ns,
+                                                       std::uint64_t size,
+                                                       const std::uint8_t *encoded,
+                                                       std::uint64_t encoded_size,
+                                                       std::uint64_t begin_ns,
                                                        std::uint64_t end_ns,
                                                        MiraHostStatus error_status) {
     MiraAndroidHostV1 *host = nullptr;
@@ -891,6 +1135,14 @@ extern "C" MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation,
         deliver_status_result(view, correlation, MIRA_HOST_OP_CAPTURE_FRAME,
                               MIRA_HOST_ERR_INVALID_BUFFER);
         return MIRA_HOST_ERR_INVALID_BUFFER;
+    }
+    // 宿主编码登记（DEC-013）：以原始帧字节 sha256 为键，loop 侧注入 store 在
+    // commit 时据此转码发布；无编码载荷时跳过（原始帧按 x-host-frame 如实发布）。
+    if (encoded != nullptr && encoded_size > 0) {
+        const auto digest = mira::digest_bytes(std::as_bytes(std::span(pixels, byte_size)));
+        std::vector<std::byte> payload(encoded_size);
+        std::memcpy(payload.data(), encoded, encoded_size);
+        miracle::bridge::frame_encoding_registry().put(digest, std::move(payload));
     }
     auto *buffer = new (std::nothrow) std::uint8_t[byte_size];
     auto *lease_context = new (std::nothrow) LeaseContext{};

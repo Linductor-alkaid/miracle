@@ -1,8 +1,8 @@
 # Miracle 总体架构设计
 
-> 状态：Proposed
-> 版本：1.0
-> 更新日期：2026-09-05
+> 状态：Proposed（P3 实现同步修订）
+> 版本：1.1
+> 更新日期：2026-09-06
 > 上位文档：[可行性分析与方案](../feasibility-and-solution.md)、[工程规范](../project/project-standards.md)
 > 关联决策：[DEC-001 前端形态](../decisions/DEC-001-frontend-compose.md)、
 > [DEC-002 工具集路线](../decisions/DEC-002-agent-tool-set-route.md)、
@@ -54,7 +54,8 @@
 | `host.InputDispatcher` | Kotlin | 手势合成与 dispatchGesture、焦点文本注入、取消（原子语义：未提交 CANCELLED／已提交 EXECUTION_UNCERTAIN+side=1）与 RELEASE_ALL | `fun dispatch(events, deadline): Receipt` |
 | `host.CapabilityRegistry` | Kotlin | 能力快照、epoch 维护（旋转/权限/会话变化递增）、权限自检 | `fun snapshot(): HostCapabilities` |
 | `bridge.host_abi_impl` | C++ | 实现 `mira_android_host_*` 全部符号；操作注册表（correlation→pending）；lease 生命周期 | （被 mira adapter 调用，无上层接口） |
-| `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、AndroidHostAdapter+AgentLoop+ModelGateway 组装、观察者回调封送 | JNI 导出：`nativeInit/nativeStartTask/nativeTakeover/nativeShutdown` 等 |
+| `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、自检入口封送、JNI 注册 | JNI 导出（P3 实际面）：`loopOpen/loopSubmit/loopCancel/loopTakeover/loopClose/loopState`、`modelConnectivityTest`、`consentResolve`、`nativeHttpExchangeComplete` 等 |
+| `bridge.loop_runtime` | C++ | P3 新增：AgentLoop 组装（gateway/provider/admission/事件存储/verifier）、宿主 `IHttpTransport`（Kotlin HTTPS 执行 + C++ 协作等待）、脚本化干跑传输、R3 确认协议（`ConfirmationAuthority`） | 被 runtime_glue 调用；host_abi_impl 经其查询会话活跃/签发挑战 |
 | `mira`（上游） | C++ | Observe→Reason→Plan→Act→Verify 闭环、模型网关、持久状态 | `find_package(Mira)` 公共 API |
 
 ## 3. 一次任务闭环的数据流
@@ -101,16 +102,20 @@
 
 ## 5. 状态投影
 
-mira 状态机是唯一事实源；`AgentRuntime` 将 `IAgentObserver` 事件投影为 Kotlin
-`SessionState`（sealed class：Idle/Observing/Reasoning/Acting/Verifying/Recovering/
-Completed/Failed/Takeover）与 `SessionEvent`（步进、动作摘要、确认请求、错误、终态）。
-UI 与悬浮球只读该投影；投影层不做业务决策。
+mira 状态机是唯一事实源；`AgentRuntime` 将运行时事件投影为 Kotlin
+`SessionState`（sealed class：Idle/Running(phase,steps,takeover)/Terminal(outcome)）与
+时间线事件。UI 与悬浮球只读该投影；投影层不做业务决策。
+
+P3 粒度注记：mira `AgentLoop` 公共 API 无逐步观察者（仅终态 `AgentLoopResult`），故
+相位为宿主真实信号驱动的**粗投影**（capture 受理＝Observing、transport 执行＝
+Reasoning、input 受理＝Acting；终态与步进记录经结果 JSON）。逐相位/逐步实时投影以
+mira 提供观察者回调为前置（观察项，随上游反馈评估）；悬浮球呼吸＝活动指示。
 
 ## 6. 数据与凭据
 
 | 数据 | 位置 | 处理规则 |
 | --- | --- | --- |
-| 模型 API key | Android Keystore 加密密文 + DataStore | 不入日志/事件；bridge 收到的是内存中的传输凭据 |
+| 模型 API key | Android Keystore（AES-256-GCM）加密密文，存 filesDir；其余配置存 SharedPreferences（P3 注记：字段量小，v1 未引入 DataStore 依赖） | 不入日志/事件；bridge 收到的是内存中的传输凭据 |
 | mira 持久状态（checkpoint/memory/事件） | `filesDir/mira/*.db`（SQLite WAL） | 随应用数据卸载删除；升级保留 |
 | 截图 | 内存租约 + mira ArtifactStore（有界） | 出设备前经同意；日志仅摘要引用；崩溃报告不携带 |
 | 应用配置 | DataStore | 端点、预算、步数上限、风险策略开关 |

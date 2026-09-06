@@ -166,3 +166,51 @@ PJE110 / Android 16 / API 36 已连接过）。
   ColorOS 不同，自动化脚本需按厂商定位。
 - 结论：印证"代码一份、验证多台"的设备策略；兼容性矩阵新增
   `huai-ada-al00.md`（Huawei ADA-AL00，Runtime verified(device)）。
+
+2026-09-06（P1 缺陷修复：授权后自检停留"正在执行环境自检…"，UI 状态机搁浅）：
+
+- 现象（用户报告，OnePlus Ace 3）：投影授权选择"整个屏幕"后，录屏指示出现、两帧
+  预览已输出，但 P1 卡片停留 Running，既不呈现通过也不呈现失败。
+- 根因（代码走查，设备未接入无法抓栈，依据链路穷举）：
+  1. native 侧不存在无界等待：mira `observe` 受 deadline+200ms 宽限约束
+     （`android_host_adapter.cpp` wait_for_outcome），epoch 失配返回 StaleObservation
+     错误，宿主 stop/destroy 与 lease 等待均有界——首跑最坏 ~25s 必然返回终态 JSON；
+  2. 搁浅在 UI 状态机：`CaptureViewModel.selfTestLaunched` 为进程级一次性守卫而
+     `_state` 为 ViewModel 实例私有，进程内第二次授权（"再次自检"按钮——换选
+     "整个屏幕"重试即此路径）时 `markConsumed()` 先置 Running 再被守卫早退，无任何
+     完成方；用户看到的两帧是 `HostBridge.frames` 单例中上一轮（单应用投影）残留。
+     "整屏"与故障为伴随关系（第二次尝试），非因果；Activity 重建场景（本计划遗留
+     改进项）属同族缺陷。
+- 修复（均在 miracle 自研层）：
+  1. `fix(ui)`：自检状态机重构为进程级 `CaptureSelfTestCoordinator`（状态共享 +
+     在途去重 + 重跑折叠），"再次自检"重新执行完整 native 自检；重建实例投影同一
+     状态流，不再搁浅于 Running；
+  2. `fix(host)`：`AgentForegroundService` 对携带新授权数据的重复 start 拆旧建新
+     重建投影会话（Android 14+ 同一时刻仅一个活跃投影，旧授权随新授权失效），
+     并以投影身份守卫拦截旧投影的迟到 onStop；不再静默丢弃再次授权；
+  3. `fix(host)`：`ScreenCaptureProvider` 取帧引用与像素拷贝并入同一 frameLock
+     临界区，消除"await 返回后、拷贝前持帧被 listener 关闭"竞争——整屏模式录屏
+     指示动画使帧持续翻动，该窗口不再是罕见路径。
+- 测试：新增 `CaptureSelfTestCoordinatorTest`（8 例：首跑、再次授权重跑、在途折叠
+  为一次重跑、拒绝、Bound 补跑与终态不重跑、服务超时、失败负载、native 异常）；
+  `testDebugUnitTest assembleDebug lintDebug` 全绿（62/62）。
+- 真机矩阵复验（2026-09-06 16:18–16:27，OnePlus Ace 3 / Android 16 / API 36，
+  证据等级 Runtime verified(device)）：
+  - 场景 A·单应用首跑：授权（ColorOS 三步）→ bind 后 ~450ms 出结果，两帧 640×1406
+    epoch=1（252.0/192.2ms），UI"✅ 环境自检通过"，bridge/host 违规计数全 0，
+    shutdown Completed；
+  - 场景 B·同进程"再次自检"换整屏（原故障路径）：自检通过，**epoch=2**（投影会话
+    重建生效），帧预览为完整主屏幕（整屏采集生效），违规计数全 0；用户侧同步观察
+    通过、延时不长；
+  - 场景 C·进程重启后整屏授权：host bound 16:24:54.346 → `ok:true` 16:24:55.336，
+    **bind→结果 ~1.0s**（帧 508.2/473.5ms）；
+  - 负向与生命周期：FATAL/ANR 计数 0；force-stop 干净退出；重启后 P1 卡 Idle、
+    按钮可用，无搁浅残留。
+  - ColorOS 授权步骤数差异：单应用三步（确认→选择器→选应用），**整屏四步**（确认→
+    选择器→整个屏幕→"屏幕共享"再次确认）；授权期间 UI 呈 Requesting（"等待投影
+    授权…"），等待时长由对话框点击节奏决定，与 app 无关。
+  - 取证方法注记：本机 logcat 缓冲区分钟级滚动（证据须实时落盘）；会话中发现屏幕
+    截图读取出现过期缓存复用（同 URL 返回旧图），时间线判定以 logcat 为准、截图
+    以 md5 区分新鲜度。
+  - 构建基线：上述复验 APK 含 mira lock 升级 `cbed6ad`（宿主 PNG 编码工件链，
+    帧日志 `png=` 字段即其输出）与本次三项修复，合并验证通过。
