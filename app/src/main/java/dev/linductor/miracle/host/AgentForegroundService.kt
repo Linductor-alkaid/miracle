@@ -17,15 +17,24 @@ import android.os.Looper
 import android.util.Log
 import dev.linductor.miracle.MainActivity
 import dev.linductor.miracle.R
+import dev.linductor.miracle.overlay.OverlayController
+import dev.linductor.miracle.runtime.AgentRuntime
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
- * Agent 宿主前台服务（P1：承载 MediaProjection 截屏管线）。
+ * Agent 宿主前台服务（P1：MediaProjection 截屏管线；P3：常驻通知状态联动 +
+ * 通知 action（停止/接管）+ 悬浮球生命周期 owner）。
  *
  * 生命周期顺序遵守 Android 14+ 语义：先 startForeground(mediaProjection 类型)，
  * 再 getMediaProjection。投影授权每次会话独立（DEC-003/构建打包设计 §5.1）。
+ * 通知与悬浮球消费同一 AgentRuntime.state 流（活动指示同源，前端设计 §5）。
  */
 class AgentForegroundService : Service() {
 
@@ -37,6 +46,8 @@ class AgentForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         const val EXTRA_RESULT_CODE = "dev.linductor.miracle.extra.RESULT_CODE"
         const val EXTRA_RESULT_DATA = "dev.linductor.miracle.extra.RESULT_DATA"
+        const val ACTION_TAKEOVER = "dev.linductor.miracle.action.TAKEOVER"
+        const val ACTION_CANCEL_TASK = "dev.linductor.miracle.action.CANCEL_TASK"
 
         private val _state = MutableStateFlow(HostState.Idle)
         val state: StateFlow<HostState> = _state.asStateFlow()
@@ -60,12 +71,34 @@ class AgentForegroundService : Service() {
     private var provider: ScreenCaptureProvider? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // 服务拥有的结构化作用域（EXEC-03；onDestroy 取消）。
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var overlay: OverlayController? = null
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        overlay = OverlayController(this, serviceScope)
+        // 常驻通知文案随会话状态联动（同一状态源）。
+        serviceScope.launch {
+            AgentRuntime.state.collect { state ->
+                updateNotification(state)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_TAKEOVER -> {
+                AgentRuntime.takeover()
+                return START_NOT_STICKY
+            }
+
+            ACTION_CANCEL_TASK -> {
+                AgentRuntime.cancelSession()
+                return START_NOT_STICKY
+            }
+        }
         // 幂等：已绑定的宿主忽略重复 start（Activity 重建可能重放授权结果，
         // 而 consent data 只能消费一次，重复消费必然失败且无意义）。
         if (provider != null) {
@@ -100,6 +133,8 @@ class AgentForegroundService : Service() {
             _state.value = HostState.Bound
             _stateMessage.value = ""
             Log.i(TAG, "host bound: ${capture.topologyJson()}")
+            // 悬浮球随会话显示（未授权悬浮窗时跳过，主 GUI 仍可用——降级矩阵）。
+            overlay?.show()
         } catch (error: Exception) {
             Log.e(TAG, "projection start failed", error)
             _state.value = HostState.Failed
@@ -112,12 +147,14 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         teardown()
+        serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun teardown() {
+        overlay?.hide()
         HostBridge.unbind()
         provider?.release()
         provider = null
@@ -126,7 +163,7 @@ class AgentForegroundService : Service() {
     }
 
     private fun startForegroundWithType() {
-        val notification = buildNotification()
+        val notification = buildNotificationText(getString(R.string.agent_notification_text))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
@@ -136,17 +173,53 @@ class AgentForegroundService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun updateNotification(state: AgentRuntime.SessionState) {
+        val text = when (state) {
+            is AgentRuntime.SessionState.Running -> "运行中：${
+                when (state.phase) {
+                    dev.linductor.miracle.runtime.LoopEventParser.Phase.Observing -> "观察"
+                    dev.linductor.miracle.runtime.LoopEventParser.Phase.Reasoning -> "推理"
+                    dev.linductor.miracle.runtime.LoopEventParser.Phase.Acting -> "动作"
+                    dev.linductor.miracle.runtime.LoopEventParser.Phase.Unknown -> "进行中"
+                }
+            } · 动作 ${state.stepEvents} 次"
+
+            is AgentRuntime.SessionState.Terminal ->
+                if (state.ok) "任务完成" else "任务结束：${state.outcome}"
+
+            AgentRuntime.SessionState.Idle -> getString(R.string.agent_notification_text)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(
+            NOTIFICATION_ID,
+            buildNotificationText(text),
+        )
+    }
+
+    private fun buildNotificationText(text: String): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val cancel = PendingIntent.getService(
+            this, 1,
+            Intent(this, AgentForegroundService::class.java).setAction(ACTION_CANCEL_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val takeover = PendingIntent.getService(
+            this, 2,
+            Intent(this, AgentForegroundService::class.java).setAction(ACTION_TAKEOVER),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.agent_notification_title))
-            .setContentText(getString(R.string.agent_notification_text))
+            .setContentText(text)
             .setContentIntent(open)
+            .addAction(Notification.Action.Builder(null, "停止任务", cancel).build())
+            .addAction(Notification.Action.Builder(null, "接管", takeover).build())
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
     }
 
