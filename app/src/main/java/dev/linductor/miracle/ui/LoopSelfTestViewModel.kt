@@ -80,7 +80,9 @@ class LoopSelfTestViewModel : ViewModel() {
      * ① complete：tap→tap→done，断言 Completed 且靶点计数≥2；
      * ② max_steps：maxSteps=2 + 4×tap 脚本，断言 MaxSteps；
      * ③ cancel：提交 1.5s 后协作取消，断言 Cancelled；
-     * ④ r3：目标含"发送"（策略从严），tap 前触发 R3 确认弹窗（批准后完成）。
+     * ④ r3：目标含"发送"（策略从严），tap 前触发 R3 确认弹窗（批准后完成）；
+     * ⑤ takeover：提交 1.5s 后 Human Takeover（阻断新决策 + 取消 + RELEASE_ALL +
+     *    确认失效），断言 Cancelled 且关闭干净。
      */
     fun runDryRun(context: Context, scenario: String) {
         if (_dryRun.value is DryRunState.Running || AgentRuntime.sessionOpen) {
@@ -100,7 +102,7 @@ class LoopSelfTestViewModel : ViewModel() {
                 }
 
                 "max_steps" -> Triple("不断点击靶点", 2, List(4) { tapDecision() })
-                "cancel" -> Triple("点击靶点", 8, List(4) { tapDecision() })
+                "cancel", "takeover" -> Triple("点击靶点", 8, List(4) { tapDecision() })
                 else -> {
                     _dryRun.value = DryRunState.Done(scenario, "Unknown", false, "未知场景")
                     return@launch
@@ -123,6 +125,9 @@ class LoopSelfTestViewModel : ViewModel() {
             if (scenario == "cancel") {
                 launchCancelAfterDelay()
             }
+            if (scenario == "takeover") {
+                launchTakeoverAfterDelay()
+            }
             // 有界等待终态（干跑场景上限 60s；Terminal 由 AgentLoopResult 投影）。
             val terminal = withTimeoutOrNull(60_000) {
                 AgentRuntime.state.first { it is AgentRuntime.SessionState.Terminal }
@@ -142,7 +147,7 @@ class LoopSelfTestViewModel : ViewModel() {
                 "complete", "r3" ->
                     terminal.ok && _tapCount.value >= tapExpectation && closeOk
                 "max_steps" -> terminal.outcome == "MaxSteps" && closeOk
-                "cancel" -> terminal.outcome == "Cancelled" && closeOk
+                "cancel", "takeover" -> terminal.outcome == "Cancelled" && closeOk
                 else -> false
             }
             val detail = buildString {
@@ -162,6 +167,11 @@ class LoopSelfTestViewModel : ViewModel() {
     private fun launchCancelAfterDelay(): Job = viewModelScope.launch {
         delay(1_500)
         AgentRuntime.cancelSession()
+    }
+
+    private fun launchTakeoverAfterDelay(): Job = viewModelScope.launch {
+        delay(1_500)
+        AgentRuntime.takeover()
     }
 
     private fun tapDecision(): JSONObject = JSONObject()
