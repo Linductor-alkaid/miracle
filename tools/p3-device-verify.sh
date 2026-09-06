@@ -17,8 +17,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="${ADB:-$HOME/Android/Sdk/platform-tools/adb}"
-SERIAL="${1:-}"
 PKG="dev.linductor.miracle"
+# 首参为序列号仅当它不是场景名（免序列号调用时自动忽略）
+SCENARIO_NAMES='setup|complete|max_steps|cancel|r3|connectivity|takeover'
+SERIAL=""
+if [ "$#" -gt 0 ] && ! printf '%s' "$1" | grep -qxE "$SCENARIO_NAMES"; then
+    SERIAL="$1"
+fi
 OUT_DIR="$ROOT/build/p3-device-evidence"
 APK="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
 
@@ -59,8 +64,9 @@ scenario_setup() {
     adb_cmd install -r "$APK"
     # 通知权限（API 33+ 可 adb 授予）
     adb_cmd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
-    # 悬浮窗（appops；ColorOS 生效）
-    adb_cmd shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow
+    # 悬浮窗（appops；ColorOS 16 可能拒绝 shell 设置——降级为人工引导，不阻断）
+    adb_cmd shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow 2>/dev/null || \
+        echo "!! appops 被系统拒绝：悬浮球需在设置页手动授权（仅影响球体交互取证）" 
     # 无障碍（install -r 会清除，重启服务）
     adb_cmd shell settings put secure enabled_accessibility_services \
         "$PKG/.host.MiracleAccessibilityService"
@@ -91,11 +97,10 @@ run_scenario() {
             --es "$PKG.extra.AUTO_SCENARIO" connectivity
         ;;
     takeover)
-        # 长按悬浮球（初始位置约 x=24+66, y=400+66 屏幕像素；拖动会改变位置）
-        adb_cmd shell am start -n "$PKG/.MainActivity" --es "$PKG.extra.AUTO_SCENARIO" complete
-        sleep 6
-        echo "-- 触发悬浮球长按（≥900ms）＝Human Takeover"
-        adb_cmd shell input swipe 90 466 90 466 900
+        # 语义链路经 auto 场景驱动（admission 失效→取消→RELEASE_ALL→确认失效）；
+        # 悬浮球长按手势为独立人工取证项（若已授权悬浮窗）。
+        adb_cmd shell am start -n "$PKG/.MainActivity" \
+            --es "$PKG.extra.AUTO_SCENARIO" takeover
         ;;
     *)
         adb_cmd shell am start -n "$PKG/.MainActivity" \
@@ -132,8 +137,10 @@ run_scenario() {
 
 mkdir -p "$OUT_DIR"
 wait_for_device
-shift $((SERIAL != "" ? 1 : 0)) || true
-SCENARIOS=("${@:-}")
+if [ -n "$SERIAL" ]; then
+    shift
+fi
+SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ] || [ "${SCENARIOS[0]}" = "setup" ]; then
     scenario_setup
     [ ${#SCENARIOS[@]} -le 1 ] && SCENARIOS=(complete max_steps cancel r3 takeover)
