@@ -1,8 +1,8 @@
 # Miracle 前端设计
 
-> 状态：Proposed
-> 版本：1.0
-> 更新日期：2026-09-05
+> 状态：Proposed（P3 实现同步修订）
+> 版本：1.1
+> 更新日期：2026-09-06
 > 上位文档：[总体架构设计](system_architecture_design.md)
 > 关联决策：[DEC-001 前端形态](../decisions/DEC-001-frontend-compose.md)
 
@@ -47,7 +47,9 @@ UI（组合函数 = 组件、状态驱动重组 = re-render、单向数据流）
 
 ## 3. UI 架构
 
-- **单 Activity + Compose Navigation**；无 Fragment（v1 无需）。
+- **单 Activity + Compose Navigation**；无 Fragment（v1 无需）。P3 实现注记：以枚举
+  底部导航（任务/自检/设置）承载三页切换，暂未引入 navigation 依赖（页面量小，
+  P3 计划决策 10 记录偏差）；页面增多时再引入路由库。
 - **单向数据流（UDF）**：UI 事件 → `ViewModel` 意图 → `AgentRuntime` 门面 → 状态流更新 →
   UI 重组。ViewModel 只做投影与编排，不承载业务规则。
 - **唯一事实源**：运行时状态来自 `AgentRuntime`（架构设计 §5）；页面级局部状态允许
@@ -83,7 +85,9 @@ App(theme, nav)
 - **悬浮球（常驻态，原生 View）**：`TYPE_APPLICATION_OVERLAY` 窗口 + 自绘 `View`（画布绘
   制状态环）。理由：常驻显示不需要 Compose 运行时开销；拖动、边缘吸附、长按手势用原生
   触摸处理最稳。状态环颜色映射 `SessionState`（灰=Idle、蓝=Observing/Reasoning、橙=
-  Acting、绿=Completed、红=Failed/需确认、闪烁=Takeover 待恢复）。
+  Acting、绿=Completed、红=Failed/需确认、闪烁=Takeover 待恢复）。P3 实现注记：球随
+  `AgentForegroundService`（投影会话）生命周期显示；拖动为屏内贴指移动（边缘吸附为
+  简化实现）；长按 ≥600ms 触发 takeover；运行相位高频呼吸＝活动指示。
 - **展开面板（交互态，Compose）**：点击球体展开第二个 overlay 窗口，内嵌 `ComposeView`
   （为其装配 `ViewTreeLifecycleOwner`/`SavedStateRegistryOwner` 的宿主实现）。面板提供：
   快捷新目标、暂停/继续、停止、takeover、最近动作摘要。关闭即回收窗口与 Composition。

@@ -79,7 +79,7 @@
 
 ### MIR-20260906-006：安装包未导出网络传输头文件（有库无头）
 
-- 状态：Open
+- 状态：Open（已反馈上游：mira [#14](https://github.com/Linductor-alkaid/mira/issues/14)，2026-09-06；经 `fix/host-abi-feedback-round1` HEAD `6ea3181` 复核仍成立）
 - 分级：P2（结构性：宿主无法使用官方生产传输，被迫自建传输实现）
 - 证据：mira `16e419e` 的 `CMakeLists.txt` L400-430：`mira_net_transport`/
   `mira_mbedtls_transport` 安装了库，但 `install(DIRECTORY include/ …)` 只安装主
@@ -100,7 +100,7 @@
 
 ### MIR-20260906-007：AgentLoop 图像 artifact 路径对真实 OpenAI 兼容 VLM 不可消费
 
-- 状态：Open
+- 状态：Open（已反馈上游：mira [#15](https://github.com/Linductor-alkaid/mira/issues/15)，2026-09-06；核心问题经 `fix/host-abi-feedback-round1` HEAD `6ea3181` 复核仍成立，#10 的 store 注入仅缓解存储一半）
 - 分级：P1（系统性：闭环真实模型任务全量阻断）
 - 证据：mira `16e419e` 的 `src/model/agent_loop.cpp` `build_request()`：截图
   `ArtifactRef.media_type` 硬编码 `"application/octet-stream"`、`byte_size = w*h*4`

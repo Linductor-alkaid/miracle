@@ -12,7 +12,10 @@
 dispatchGesture 全集经 mira adapter 与直接 ABI 探针双轨验证，协作取消按原子语义
 `EXECUTION_UNCERTAIN+side=1` 结算，输入安全矩阵（负向/超时/取消/home/旋转）真机
 取证，2026-09-06；上游缺口 `MIR-20260906-005` 登记）。
-下一里程碑 P3（闭环 MVP）未开始。
+**P3（闭环 MVP）实施完成、真机取证待补跑**（2026-09-06：AgentLoop 组装 + 宿主
+IHttpTransport + R3 确认协议 + 双前端全功能交付；单测 48/48、全门禁绿；真机干跑
+矩阵/连通性/悬浮球取证与"≥3 类真实任务"因无设备连接及上游缺口 MIR-006/007 阻断，
+补跑条件见 [p3-loop-mvp.md](p3-loop-mvp.md)）。
 
 ## 2. 交付边界（SCOPE）
 
@@ -56,7 +59,7 @@ dispatchGesture 全集经 mira adapter 与直接 ABI 探针双轨验证，协作
 | P0 | 骨架与消费验证：工程初始化、mira 安装链路、JNI 加载、Executor 生命周期、空 GUI/悬浮球 | —（内部基线） | [p0-skeleton-consumption.md](p0-skeleton-consumption.md)（Completed） |
 | P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | [p1-screen-capture.md](p1-screen-capture.md)（Completed） |
 | P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | [p2-input-dispatch.md](p2-input-dispatch.md)（Completed） |
-| P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | `p3-loop-mvp.md`（待建） |
+| P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | [p3-loop-mvp.md](p3-loop-mvp.md)（In Progress：代码完成，真机取证补跑） |
 | P4 | 有状态：state_store 落盘、崩溃恢复、replay 检视 | v0.4.0 | `p4-stateful.md`（待建） |
 | P5 | 验证报告与上游回流 | v0.5.0（评估报告） | `p5-validation-report.md`（待建） |
 
@@ -67,9 +70,9 @@ dispatchGesture 全集经 mira adapter 与直接 ABI 探针双轨验证，协作
 
 | 项 | 暂定值 | 负责人 | 最迟冻结 |
 | --- | --- | --- | --- |
-| R3 风险策略表初版（应用/动作组合） | 从严：支付/删除/发送/凭据输入全部确认 | Miracle Maintainers | P3 |
-| VLM 端点与预算默认值 | 未定（Settings 必填，无默认端点） | Miracle Maintainers | P3 |
-| 悬浮球交互细节（尺寸/吸附/阈值） | 原型迭代定 | Miracle Maintainers | P3 |
+| R3 风险策略表初版（应用/动作组合） | 从严：支付/删除/发送/凭据输入全部确认（P3 已冻结实现：目标关键词全会话确认 + 敏感应用内 type 确认） | Miracle Maintainers | P3（已冻结） |
+| VLM 端点与预算默认值 | 未定（Settings 必填，无默认端点；P3 已实现配置+Keystore 存储） | Miracle Maintainers | P3（已冻结） |
+| 悬浮球交互细节（尺寸/吸附/阈值） | P3 冻结：132px 球、屏内拖动贴指、长按 ≥600ms＝takeover、单击展开 | Miracle Maintainers | P3（已冻结） |
 | applicationId 定稿 | `dev.linductor.miracle` | Miracle Maintainers | P0 |
 
 已冻结：DEC-001（前端 Compose）、DEC-002（工具集路线）、DEC-003（构建与设备基线）。

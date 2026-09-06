@@ -2,6 +2,51 @@
 
 本文件记录版本级变化（工程规范 §10.5）。格式遵循 Keep a Changelog；版本号与 Git tag 对应。
 
+## [未发布] P3
+
+### 新增
+
+- 闭环运行时（`loop_runtime.cpp`）：mira AgentLoop 全链组装（Executor/AndroidHostAdapter/
+  ModelGateway/OpenAiCompatibleProvider/SimpleAdmissionGate/MemoryEventStore/
+  ModelDoneVerifier）；`AgentLoop::run` 经 `submit_cancellable` 协作取消提交；
+  takeover ＝ admission 失效 → 取消 → `interrupt()`（RELEASE_ALL）→ 确认失效；关闭按
+  §17.2 顺序有界排空。
+- 模型传输（宿主实现公共 `IHttpTransport`，MIR-20260906-006 缓解）：C++ 薄适配（封送 +
+  50ms 协作轮询 + 取消 disconnect 通知 + 容量 8）+ Kotlin `HttpURLConnection` HTTPS 执行
+  （https-only、私有/回环/链路本地地址静态与 DNS 双重复核、响应字节上限、恰好一次回流）；
+  方言映射/schema 校验/预算仍由 mira 完成。
+- 模型连通性自检：文本-only 决策请求（无 ImagePart，图像路径受 MIR-20260906-007 阻断）
+  经真实端点验证 transport→provider→gateway→decision 解析全链。
+- R3 确认协议（DEC-004，mira `ConfirmationAuthority` 为协议权威）：dispatch_input 受理后
+  准入询问（目标关键词/敏感应用+type 策略表，默认从严）；挑战绑定动作 digest+nonce+
+  task/environment epoch，60s 到期，consume 即失效；放行按停放参数派发，拒绝/到期/取消按
+  REJECTED/CANCELLED(side=0) 结算；release_all 永不确认。
+- 同意与告知：首启披露（可重置复验）、SessionGate 准入（披露+无障碍/投影/悬浮窗/通知+
+  配置完整性，缺项逐项引导）、R3 确认对话框宿主（倒计时/摘要/单次授权）。
+- 配置与凭据：设置页（端点/前缀/模型/方言/步数上限）；API key 经 AndroidKeyStore
+  AES-256-GCM 加密落 filesDir（JVM 可注入引擎已单测；AndroidKeyStore 版真机验证）。
+- 双前端：任务台（新目标/会话卡/时间线/停止/接管）、设置页、Onboarding 引导卡、
+  底部三页导航（任务/自检/设置）；悬浮球（状态环相位映射/拖动/单击展开 Compose 面板/
+  长按 ≥600ms takeover）+ 常驻通知停止/接管 action 与状态文案联动。
+- P3 自检：干跑四场景（① 完整闭环 tap→tap→done ② 步数上限 ③ 中途取消 ④ R3 确认），
+  脚本化决策 + 真实 observe/act，自身 UI 靶点副作用断言。
+- 上游台账：`MIR-20260906-006`（安装包未导出传输头文件）、`MIR-20260906-007`（loop
+  图像 artifact 对真实 VLM 不可消费——真实任务验收阻断项）。
+
+### 变更
+
+- 主 GUI 由单列自检页改为底部三页导航（任务/自检/设置），P0–P2 自检卡保留于自检页。
+- `AgentForegroundService`：通知增加停止/接管 action、文案随会话状态联动；悬浮球随
+  服务生命周期显示（v1）。
+
+### 验证
+
+- 本地门禁：`assembleDebug lintDebug testDebugUnitTest` 全绿（单测 48/48，新增 28）；
+  native 目标 NDK 独立编译零警告（-Wall -Wextra -Wpedantic）；自研代码零线程创建、
+  无 GlobalScope（grep 复核）。
+- 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接；真实任务另受
+  MIR-20260906-007 阻断）：补跑条件见 docs/plans/p3-loop-mvp.md。
+
 ## [未发布]
 
 ### 新增

@@ -1,8 +1,8 @@
 # Miracle Agent 工具集设计
 
-> 状态：Proposed
-> 版本：1.0
-> 更新日期：2026-09-05
+> 状态：Proposed（P3 实现同步修订）
+> 版本：1.1
+> 更新日期：2026-09-06
 > 上位文档：[总体架构设计](system_architecture_design.md)
 > 关联决策：[DEC-002 工具集路线](../decisions/DEC-002-agent-tool-set-route.md)
 
@@ -74,11 +74,19 @@ mira 冻结 decision schema 即 v1 工具协议。完整清单与治理策略：
   模型自述确认不构成授权。
 - **判定规则位置**：R3 判定规则（哪些应用/动作组合需确认）属于本仓库 `consent` 模块的
   可配置策略表，默认从严；策略表变更走决策记录。
+- **P3 实现注记**：策略表为 `RiskPolicy`（纯函数：目标关键词 → 全会话确认；敏感前台
+  应用 + `type` → 确认；其余会话级同意覆盖；`release_all` 豁免）。挂接点在宿主 ABI
+  `dispatch_input` 受理路径（loop 会话活跃时），挑战经 mira `ConfirmationAuthority`
+  签发（digest+nonce+epoch 绑定，60s 到期，单次有效）；"模型自述确认"无法触达该
+  挂接点（决策在 mira 侧不携带授权语义），协议闭环由 consume 校验保证。
 
 ## 5. 工具面受限的诚实声明
 
 v1 工具面**没有**：UI 树观察（mira adapter 不采纳，MIR 台账）；开应用/剪贴板/通知读取等
-宿主工具（L3 未建）；连续控制与本地感知（mira M5/M6 已取消）。LLM 完成"打开某应用"类
+宿主工具（L3 未建）；连续控制与本地感知（mira M5/M6 已取消）。另（P3 台账新增）：
+官方生产传输未随安装包导出头文件（`MIR-20260906-006`，宿主自建 `IHttpTransport`
+缓解）；AgentLoop 图像 artifact 媒体类型/读取路径对真实 OpenAI 兼容端点不可消费
+（`MIR-20260906-007`，真实任务验收阻断）。LLM 完成"打开某应用"类
 意图需经 `home` + 视觉寻找图标实现——可靠性代价已知，量化进 P5 验证报告（失败分类：
 任务建模类），作为是否建设 L3 或推动 mira 的证据。
 
