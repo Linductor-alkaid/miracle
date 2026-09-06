@@ -20,12 +20,16 @@ import java.util.concurrent.TimeoutException
  */
 object HostBridge {
 
-    /** 单帧拷贝结果（RGBA8888，行已紧凑）。 */
+    /**
+     * 单帧拷贝结果（RGBA8888，行已紧凑）。[encoded] 为同步编码的 PNG 载荷
+     * （mira DEC-013 宿主编码路径；null/空＝未编码，原始帧按 x-host-frame 发布）。
+     */
     data class CapturedFrame(
         val width: Int,
         val height: Int,
         val rotation: Int,
         val pixels: ByteArray,
+        val encoded: ByteArray?,
         val beginNs: Long,
         val endNs: Long,
     )
@@ -238,19 +242,22 @@ object HostBridge {
             android.util.Log.i(
                 "miracle/hostbridge",
                 "frame ${frame.width}x${frame.height} rot=${frame.rotation} " +
-                    "${frame.pixels.size}B in ${(frame.endNs - frame.beginNs) / 1_000_000}ms",
+                    "${frame.pixels.size}B png=${frame.encoded?.size ?: 0}B " +
+                    "in ${(frame.endNs - frame.beginNs) / 1_000_000}ms",
             )
             _frames.value = (_frames.value + frame).takeLast(4)
             nativeCompleteFrame(
                 correlation, 1, frame.width, frame.height, frame.rotation,
-                frame.pixels, frame.beginNs, frame.endNs, 0,
+                frame.pixels, frame.encoded ?: ByteArray(0), frame.beginNs, frame.endNs, 0,
             )
         }.onFailure { error ->
             android.util.Log.w(
                 "miracle/hostbridge",
                 "frame failed for correlation $correlation: $error",
             )
-            nativeCompleteFrame(correlation, 0, 0, 0, 0, ByteArray(0), 0, 0, mapError(error))
+            nativeCompleteFrame(
+                correlation, 0, 0, 0, 0, ByteArray(0), ByteArray(0), 0, 0, mapError(error),
+            )
         }
     }
 
@@ -269,6 +276,7 @@ object HostBridge {
         height: Int,
         rotation: Int,
         pixels: ByteArray,
+        encoded: ByteArray,
         beginNs: Long,
         endNs: Long,
         errCode: Int,

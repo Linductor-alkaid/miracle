@@ -37,6 +37,12 @@
   脚本化决策 + 真实 observe/act，自身 UI 靶点副作用断言。
 - 上游台账：`MIR-20260906-006`（安装包未导出传输头文件）、`MIR-20260906-007`（loop
   图像 artifact 对真实 VLM 不可消费——真实任务验收阻断项）。
+- mira lock 升级（独立变更，`16e419e` → `cbed6ad`）：采纳上游两轮反馈修复
+  （PR #16/#17，DEC-012/013），MIR-001/003/004/005/006/007 关闭（MIR-002 仍 Open）；
+  宿主编码链路落地（Kotlin 截屏同步 PNG 编码 → 原始字节 sha256 键登记 → 注入
+  `HostFrameStore` 把原始帧重新发布为 `image/png` 工件 → `StoreArtifactSource` 供
+  wire 回读），真实 VLM 闭环图像路径解除阻断（真机取证待补跑）；`inputTestDispatch`
+  adapter 路径接通 `InputEvent.duration_ms`；`loopClose` 修复 scripted 模式空指针。
 
 ### 变更
 
@@ -64,8 +70,10 @@
 - P1 自检修复门禁：`testDebugUnitTest assembleDebug lintDebug` 全绿（新增
   `CaptureSelfTestCoordinatorTest` 8 例：首跑/重跑/在途折叠/拒绝/补跑/服务超时/
   失败负载/异常路径，合计 62/62）。
-- 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接；真实任务另受
-  MIR-20260906-007 阻断）：补跑条件见 docs/plans/p3-loop-mvp.md。
+- 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接）：真实任务
+  图像路径阻断已随 mira `cbed6ad` lock 升级解除，补跑条件见 docs/plans/p3-loop-mvp.md；
+  本地门禁（lock 升级后重跑）：`assembleDebug lintDebug testDebugUnitTest` 全绿
+  （62/62），native 针对新安装前缀零警告重编译，零线程创建/无 GlobalScope grep 通过。
 
 ## [未发布]
 

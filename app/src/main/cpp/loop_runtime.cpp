@@ -4,9 +4,15 @@
 //  - LoopRuntime：唯一 Executor（4 线程/队列 128）+ AndroidHostAdapter + ModelGateway +
 //    OpenAiCompatibleProvider + admission + MemoryEventStore + ModelDoneVerifier。
 //  - 传输：公共 IHttpTransport 接口的宿主实现（响应体经 on_chunk 回调流出）。
-//      KotlinHttpTransport——HTTPS 执行在 Kotlin（HttpURLConnection），C++ 侧封送 +
-//      有界协作等待（50ms 轮询取消/完成；MIR-20260906-006 的临时缓解）；
+//      KotlinHttpTransport——HTTPS 执行在 Kotlin（HttpURLConnection，系统信任库），
+//      C++ 侧封送 + 有界协作等待（50ms 轮询取消/完成）；官方 transport 头已随
+//      mira cbed6ad 导出（MIR-006 关闭），切换官方 socket/mbedtls 栈为后续独立变更；
 //      ScriptedTransport——干跑探针，按脚本返回合法 decision wire JSON。
+//  - 帧工件（mira DEC-012/013，MIR-004/007 关闭）：HostFrameStore 注入
+//    AndroidHostAdapter，commit 时把宿主随帧登记的 PNG 载荷重新发布为 image/png
+//    工件（descriptor payload 元数据随 store 记录流动，方言层据此生成
+//    data:image/png wire）；无登记载荷时原始帧按 image/x-host-frame 如实发布。
+//    StoreArtifactSource 经同一 store 供 gateway/provider 取 wire 字节。
 //  - AgentLoop::run 经 submit_cancellable 提交（StopToken → OperationContext 协作取消）；
 //    takeover：admission 失效 → request_task_cancel → adapter interrupt（RELEASE_ALL）→
 //    确认失效。
@@ -21,8 +27,11 @@
 #include "host_jni.hpp"
 #include "loop_runtime.hpp"
 
+#include "frame_encoding.hpp"
+
 #include <mira/adapters/android/android_host_adapter.hpp>
 #include <mira/agent_loop.hpp>
+#include <mira/artifact_store.hpp>
 #include <mira/core_contracts.hpp>
 #include <mira/environment.hpp>
 #include <mira/event_store.hpp>
@@ -144,16 +153,110 @@ class HostSecretResolver final : public mira::ISecretResolver {
     std::string key_;
 };
 
-// fail-closed 工件源：loop 图像路径受 MIR-20260906-007 阻断；文本-only 请求不触达。
+// fail-closed 工件源：连通性自检（文本-only，无截图部件）使用；请求触达即如实报错。
 class FailClosedArtifactSource final : public mira::IArtifactSource {
   public:
     mira::Result<std::vector<std::byte>> fetch(const mira::ArtifactRef &) override {
         mira::Error error;
         error.code = mira::ErrorCode::UnsupportedCapability;
         error.domain = "miracle.bridge";
-        error.safe_message = "artifact fetch is unavailable (MIR-20260906-007)";
+        error.safe_message = "artifact fetch is unavailable in this stack";
         return error;
     }
+};
+
+// 注入 AndroidHostAdapter 的帧载荷 store（mira DEC-012 注入点 + DEC-013 宿主编码）。
+// 委托内部 MemoryArtifactStore（ArtifactWriter 构造对官方 store 友元封闭，本类型经
+// 公共 begin/commit/open 完成转码，不触碰内部表示）：
+//  1. adapter 以 spec{image/x-host-frame} 写入原始帧字节并 commit；
+//  2. commit 按原始字节 sha256 查 [frame_encoding_registry]；命中则把宿主登记的 PNG
+//     载荷以 spec{image/png} 重新发布并回收原始工件，返回 PNG 描述符（payload 媒体
+//     类型/字节数/摘要由本记录决定，ScreenFrameDescriptor 与 wire 随之流动）；
+//  3. 未命中（宿主未编码，如无 Kotlin 上投的路径）原样返回原始描述符——诚实标注，
+//     方言层对非 image/* 才拒绝，image/x-host-frame 过门但真实端点可能仍拒（上游
+//     既定边界，见 DEC-013）。
+class HostFrameStore final : public mira::IArtifactStore {
+  public:
+    explicit HostFrameStore(std::size_t capacity_bytes) : inner_(capacity_bytes) {}
+
+    mira::Result<mira::ArtifactWriter> begin(const mira::ArtifactWriteSpec &spec) override {
+        return inner_.begin(spec);
+    }
+
+    mira::Result<mira::ArtifactDescriptor> commit(mira::ArtifactWriter &writer) override {
+        auto raw = inner_.commit(writer);
+        if (!raw.has_value() ||
+            raw.value().media_type != "image/x-host-frame") {
+            return raw;
+        }
+        const auto encoded =
+            miracle::bridge::frame_encoding_registry().peek(raw.value().digest);
+        if (!encoded.has_value() || encoded.value().empty()) {
+            return raw;
+        }
+        mira::ArtifactWriteSpec png_spec;
+        png_spec.media_type = "image/png";
+        png_spec.max_bytes = encoded.value().size();
+        auto publisher = inner_.begin(png_spec);
+        if (!publisher.has_value()) {
+            return raw; // 容量不足等：回退原始工件（仍可消费）
+        }
+        if (const auto written = publisher.value().write(encoded.value());
+            !written.has_value()) {
+            return raw;
+        }
+        auto published = inner_.commit(publisher.value());
+        if (!published.has_value()) {
+            return raw;
+        }
+        // 转码成功后回收原始工件容量（尽力而为，失败不回滚已发布结果）。
+        (void)inner_.erase(mira::ArtifactErasureRequest{raw.value().id, "transcoded to png"});
+        return published;
+    }
+
+    mira::Result<mira::ArtifactReader> open(const mira::ArtifactDescriptor &descriptor) const override {
+        return inner_.open(descriptor);
+    }
+
+    mira::Result<mira::ErasureReceipt> erase(const mira::ArtifactErasureRequest &request) override {
+        return inner_.erase(request);
+    }
+
+  private:
+    mira::MemoryArtifactStore inner_;
+};
+
+// wire 侧工件源：provider/方言层经 ArtifactRef（id+digest+byte_size+media_type，
+// 即帧描述符发布的载荷元数据）回读字节，仅以公共 store API 取有界载荷。
+class StoreArtifactSource final : public mira::IArtifactSource {
+  public:
+    explicit StoreArtifactSource(std::shared_ptr<mira::IArtifactStore> store)
+        : store_(std::move(store)) {}
+
+    mira::Result<std::vector<std::byte>> fetch(const mira::ArtifactRef &reference) override {
+        if (!store_) {
+            mira::Error error;
+            error.code = mira::ErrorCode::Unavailable;
+            error.domain = "miracle.bridge";
+            error.safe_message = "frame artifact store is not available";
+            return error;
+        }
+        mira::ArtifactDescriptor descriptor;
+        descriptor.id = reference.id;
+        descriptor.digest = reference.digest;
+        descriptor.byte_size = reference.byte_size;
+        descriptor.media_type = reference.media_type;
+        auto reader = store_->open(descriptor);
+        if (!reader.has_value()) {
+            mira::Error error = reader.error();
+            error.domain = "miracle.bridge";
+            return error;
+        }
+        return reader.value().bytes();
+    }
+
+  private:
+    std::shared_ptr<mira::IArtifactStore> store_;
 };
 
 // ---- Kotlin 传输（公共 IHttpTransport 的宿主实现） ----
@@ -526,6 +629,9 @@ struct LoopRuntime final {
     std::shared_ptr<mira::MemoryEventStore> events;
     std::shared_ptr<KotlinHttpTransport> kotlin_transport;
     mira::ModelDoneVerifier verifier;
+    // 帧载荷 store：注入 adapter（必须先于 adapter 声明——注入 store 的生命周期
+    // 覆盖 adapter，成员逆序析构保证 adapter 先销毁）。
+    std::shared_ptr<HostFrameStore> frame_store;
     std::shared_ptr<mira::adapters::android::AndroidHostAdapter> adapter;
 
     mira::AgentLoopConfig loop_config;
@@ -598,7 +704,7 @@ std::shared_ptr<mira::ModelProfile> build_profile(const std::string &endpoint,
     const auto configured = mira::CapabilityEvidence::Configured;
     profile->capabilities.text = mira::CapabilityFlag{true, configured, "user endpoint"};
     profile->capabilities.image_input =
-        mira::CapabilityFlag{true, configured, "user endpoint (MIR-20260906-007)"};
+        mira::CapabilityFlag{true, configured, "user endpoint (host-encoded png wire)"};
     profile->capabilities.strict_json_schema =
         mira::CapabilityFlag{true, configured, "user endpoint"};
     profile->capabilities.sse = mira::CapabilityFlag{false, configured, "non-stream"};
@@ -653,7 +759,7 @@ std::string loop_result_json(const mira::AgentLoopResult &result, std::uint64_t 
     return header;
 }
 
-// 组装 LoopRuntime 的 mira 对象栈（open 与 connectivity 共用；transport 由调用方注入）。
+// 组装模型对象栈（open 与 connectivity 共用；transport 与工件源由调用方注入）。
 struct AssembledStack final {
     std::shared_ptr<HostSecretResolver> secrets;
     std::shared_ptr<mira::ModelProfile> profile;
@@ -666,11 +772,11 @@ struct AssembledStack final {
 bool assemble_stack(AssembledStack &stack, executor::Executor &executor,
                     const std::shared_ptr<mira::ModelProfile> &profile,
                     const std::shared_ptr<mira::IHttpTransport> &transport,
+                    const std::shared_ptr<mira::IArtifactSource> &artifacts,
                     const std::string &api_key) {
     stack.secrets = std::make_shared<HostSecretResolver>(api_key);
     stack.profile = profile;
     stack.router.register_profile(profile);
-    auto artifacts = std::make_shared<FailClosedArtifactSource>();
     stack.gateway = std::make_unique<mira::ModelGateway>(executor, stack.router, artifacts,
                                                          mira::PriceTable{},
                                                          mira::ModelGatewayConfig{});
@@ -943,7 +1049,13 @@ std::int32_t open(const std::string &config_json) {
         return -2;
     }
 
-    auto created = mira::adapters::android::AndroidHostAdapter::create(runtime->executor);
+    // 注入帧载荷 store（mira DEC-012）：容量按 PNG 载荷预算（原始帧转码后即回收；
+    // 未编码回退路径下等同 mira 默认 64MiB 的两倍，覆盖 max_steps=128 的极端序列）。
+    runtime->frame_store = std::make_shared<HostFrameStore>(128ULL * 1024ULL * 1024ULL);
+    mira::adapters::android::AndroidHostAdapterOptions adapter_options;
+    adapter_options.artifact_store = runtime->frame_store;
+    auto created =
+        mira::adapters::android::AndroidHostAdapter::create(runtime->executor, adapter_options);
     if (!created.has_value()) {
         (void)runtime->executor.shutdown(true);
         __android_log_print(ANDROID_LOG_WARN, kLogTag, "adapter create failed: %s",
@@ -979,8 +1091,11 @@ std::int32_t open(const std::string &config_json) {
         runtime->profile = build_profile(endpoint, api_prefix, model, dialect == "chat");
     }
 
+    // wire 工件源接帧 store：截图部件的 data URL 字节经公共 store API 回读。
+    auto artifacts = std::static_pointer_cast<mira::IArtifactSource>(
+        std::make_shared<StoreArtifactSource>(runtime->frame_store));
     AssembledStack stack;
-    if (!assemble_stack(stack, runtime->executor, runtime->profile, transport,
+    if (!assemble_stack(stack, runtime->executor, runtime->profile, transport, artifacts,
                         scripted ? std::string{"scripted"} : api_key)) {
         (void)runtime->adapter.reset();
         (void)runtime->executor.shutdown(true);
@@ -1129,7 +1244,11 @@ std::string close() {
         (void)runtime->result_future.wait_for(std::chrono::seconds(10));
     }
     runtime->adapter.reset();
-    (void)runtime->kotlin_transport->shutdown();
+    runtime->frame_store.reset(); // adapter 之后释放注入 store（宿主编码登记随之清空）
+    miracle::bridge::frame_encoding_registry().clear();
+    if (runtime->kotlin_transport != nullptr) { // scripted 干跑无 Kotlin 传输
+        (void)runtime->kotlin_transport->shutdown();
+    }
     const auto shutdown = runtime->executor.shutdown(true);
     const bool shutdown_ok = shutdown == executor::ShutdownResult::Completed;
     invalidate_confirmations_for_takeover();
@@ -1206,14 +1325,17 @@ std::string connectivity(const std::string &config_json) {
     }
     auto transport = std::make_shared<KotlinHttpTransport>();
     auto profile = build_profile(endpoint, api_prefix, model, dialect == "chat");
+    // 连通性自检文本-only（无 ImagePart）：fail-closed 工件源，触达即如实报错。
+    auto artifacts = std::static_pointer_cast<mira::IArtifactSource>(
+        std::make_shared<FailClosedArtifactSource>());
     AssembledStack stack;
-    const bool assembled = assemble_stack(stack, executor, profile, transport, api_key);
+    const bool assembled = assemble_stack(stack, executor, profile, transport, artifacts, api_key);
     if (!assembled) {
         (void)executor.shutdown(true);
         return "{\"ok\":false,\"stage\":\"profile\",\"error\":\"profile validation failed\"}";
     }
 
-    // 文本-only 决策请求（无 ImagePart；图像路径受 MIR-20260906-007 阻断，决策 2）。
+    // 文本-only 决策请求（无 ImagePart；截图 wire 路径经 HostFrameStore 由 loop 栈使用）。
     const auto connectivity_task = mira::TaskId::generate();
     stack.admission->activate(connectivity_task, 1);
     mira::ModelRequest request;

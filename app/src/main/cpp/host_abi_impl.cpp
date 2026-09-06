@@ -12,9 +12,13 @@
 //    REJECTED/CANCELLED(side=0) 结算。release_all 永不确认（安全原语）。
 //  - 粗相位信号（决策 4）：loop 会话活跃时 capture/dispatch 受理上投
 //    observing/acting；自检会话（loop 不活跃）不上投。
+//  - 帧编码登记（mira DEC-013 宿主编码路径）：宿主随帧产出 PNG 时以原始字节
+//    sha256 为键登记，注入 loop 的转码 store 在 commit 时重新发布为 image/png。
 //  - 本文件不创建线程；完成回调在完成线程直接调用，回调外不持有注册表锁。
 #include "host_jni.hpp"
 #include "loop_runtime.hpp"
+
+#include "frame_encoding.hpp"
 
 #include <mira/adapters/android/host_abi.h>
 #include <mira/event_store.hpp>
@@ -29,11 +33,21 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+namespace miracle::bridge {
+
+FrameEncodingRegistry &frame_encoding_registry() {
+    static FrameEncodingRegistry registry;
+    return registry;
+}
+
+} // namespace miracle::bridge
 
 namespace {
 
@@ -1076,13 +1090,17 @@ void miracle_host_notify_epoch_changed() {
 
 } // extern "C"
 
-// 帧完成：Kotlin 携带拷贝后的 RGBA 像素与元数据。由 HostBridge.nativeCompleteFrame
-// （见 runtime_glue.cpp）在 JVM 线程调用。声明见 host_abi_impl.hpp。
+// 帧完成：Kotlin 携带拷贝后的 RGBA 像素与元数据（encoded 为同步编码的 PNG 载荷，
+// 可空）。由 HostBridge.nativeCompleteFrame（见 runtime_glue.cpp）在 JVM 线程调用。
+// 声明见 host_abi_impl.hpp。
 extern "C" MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation, bool ok,
                                                        std::uint32_t width, std::uint32_t height,
                                                        std::uint32_t rotation,
                                                        const std::uint8_t *pixels,
-                                                       std::uint64_t size, std::uint64_t begin_ns,
+                                                       std::uint64_t size,
+                                                       const std::uint8_t *encoded,
+                                                       std::uint64_t encoded_size,
+                                                       std::uint64_t begin_ns,
                                                        std::uint64_t end_ns,
                                                        MiraHostStatus error_status) {
     MiraAndroidHostV1 *host = nullptr;
@@ -1117,6 +1135,14 @@ extern "C" MiraHostStatus miracle_host_complete_frame(std::uint64_t correlation,
         deliver_status_result(view, correlation, MIRA_HOST_OP_CAPTURE_FRAME,
                               MIRA_HOST_ERR_INVALID_BUFFER);
         return MIRA_HOST_ERR_INVALID_BUFFER;
+    }
+    // 宿主编码登记（DEC-013）：以原始帧字节 sha256 为键，loop 侧注入 store 在
+    // commit 时据此转码发布；无编码载荷时跳过（原始帧按 x-host-frame 如实发布）。
+    if (encoded != nullptr && encoded_size > 0) {
+        const auto digest = mira::digest_bytes(std::as_bytes(std::span(pixels, byte_size)));
+        std::vector<std::byte> payload(encoded_size);
+        std::memcpy(payload.data(), encoded, encoded_size);
+        miracle::bridge::frame_encoding_registry().put(digest, std::move(payload));
     }
     auto *buffer = new (std::nothrow) std::uint8_t[byte_size];
     auto *lease_context = new (std::nothrow) LeaseContext{};

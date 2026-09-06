@@ -149,7 +149,8 @@ keytool -genkeypair -v -keystore miracle-release.jks -alias miracle \
 4. 120Hz 高刷下手势时长参数以真机实测校准（P2 输入矩阵项）。
 
 **设备策略**：v1 只声明 OnePlus Ace 3（API 34+，实际以登记为准）为受支持真机；模拟器
-受限于 mira 无 android-x86_64 预设（登记 `MIR-` 台账，POST 项），不作为能力证据。
+路径已随 mira android-x86_64 预设解锁（`MIR-20260905-003` 关闭），消费侧双 ABI 构建
+与 instrumented 冒烟为 POST 项，解锁前不作为能力证据。
 
 ## 8. 发布物清单（每次发布核对）
 

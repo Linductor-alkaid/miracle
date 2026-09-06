@@ -82,11 +82,13 @@ mira 冻结 decision schema 即 v1 工具协议。完整清单与治理策略：
 
 ## 5. 工具面受限的诚实声明
 
-v1 工具面**没有**：UI 树观察（mira adapter 不采纳，MIR 台账）；开应用/剪贴板/通知读取等
-宿主工具（L3 未建）；连续控制与本地感知（mira M5/M6 已取消）。另（P3 台账新增）：
-官方生产传输未随安装包导出头文件（`MIR-20260906-006`，宿主自建 `IHttpTransport`
-缓解）；AgentLoop 图像 artifact 媒体类型/读取路径对真实 OpenAI 兼容端点不可消费
-（`MIR-20260906-007`，真实任务验收阻断）。LLM 完成"打开某应用"类
+v1 工具面**没有**：UI 树观察（宿主未实现无障碍树聚合，`accessibility_completeness=0`；
+上游聚合路径已随 mira `cbed6ad` 提供，`MIR-20260905-001` 关闭，启用为后续计划项）；
+开应用/剪贴板/通知读取等宿主工具（L3 未建）；连续控制与本地感知（mira M5/M6 已取消）。
+模型传输走宿主自建公共 `IHttpTransport`（官方 transport 头已随 mira `cbed6ad` 导出，
+`MIR-20260906-006` 关闭；切换官方栈为后续独立变更）；图像 wire 路径经宿主编码
+（截图同步转码 PNG 注入 artifact store，`MIR-20260906-007` 关闭，真机取证待补跑）。
+LLM 完成"打开某应用"类
 意图需经 `home` + 视觉寻找图标实现——可靠性代价已知，量化进 P5 验证报告（失败分类：
 任务建模类），作为是否建设 L3 或推动 mira 的证据。
 
@@ -114,7 +116,7 @@ takeover 语义约束。候选首批工具：`open_app`（R1）、`clipboard_rea
 
 | 编号 | 缺口 | 影响 | 状态 |
 | --- | --- | --- | --- |
-| `MIR-20260905-001` | `AndroidHostAdapter` 不采纳 `accessibility_completeness`，`observe()` 对 structure 请求 fail closed | v1 无 UI 树 grounding，纯视觉决策 | Open（P5 出证据） |
+| `MIR-20260905-001` | `AndroidHostAdapter` 不采纳 `accessibility_completeness`，`observe()` 对 structure 请求 fail closed | v1 无 UI 树 grounding，纯视觉决策 | Resolved（mira `cbed6ad`；宿主启用为后续项） |
 | `MIR-20260905-002` | AgentLoop 中 ToolProposals 不可执行（M3 语义） | 扩展工具只能走 L3 旁路或上游变更 | Open（POST 触发） |
 
 台账正式登记于 `docs/upstream_feedback/ledger.md`（P0 建立）；每条含可复现证据与期望

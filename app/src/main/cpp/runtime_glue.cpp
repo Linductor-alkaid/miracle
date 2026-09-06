@@ -652,9 +652,8 @@ std::unique_ptr<InputTestSession> g_input_test_session;
 std::string run_input_test_dispatch(std::int32_t kind, double x, double y, double x2, double y2,
                                     const std::string &text, std::int32_t duration_ms,
                                     std::int32_t timeout_ms) {
-    // mira InputSequence 不携带时长（payload 仅坐标/文本）；duration_ms 保留在 JNI
-    // 签名中以兼容探针复用，经 adapter 路径的手势使用宿主默认时长。
-    (void)duration_ms;
+    // mira InputEvent 自 cbed6ad 起携带 duration_ms（MIR-20260906-005 关闭）：
+    // adapter 映射到 ABI duration_ms，超宿主 max_gesture_duration_ms 由 adapter 拒绝。
     InputTestSession *session = nullptr;
     {
         std::lock_guard lock(g_input_test_mutex);
@@ -697,7 +696,11 @@ std::string run_input_test_dispatch(std::int32_t kind, double x, double y, doubl
     }
 
     mira::InputSequence sequence;
-    sequence.events.push_back(mira::InputEvent{kind_name, payload});
+    mira::InputEvent event{kind_name, payload};
+    if (duration_ms > 0) {
+        event.duration_ms = static_cast<std::uint32_t>(duration_ms);
+    }
+    sequence.events.push_back(std::move(event));
     mira::OperationContext context;
     context.operation = mira::OperationId::generate();
     context.started_at = mira::Timestamp::now();
@@ -765,11 +768,13 @@ jstring JNICALL native_environment_self_test(JNIEnv *env, jclass /*clazz*/) {
 
 void JNICALL native_complete_frame(JNIEnv *env, jclass /*clazz*/, jlong correlation, jint ok,
                                    jint width, jint height, jint rotation, jbyteArray pixels,
-                                   jlong begin_ns, jlong end_ns, jint err_code) {
+                                   jbyteArray encoded, jlong begin_ns, jlong end_ns,
+                                   jint err_code) {
     try {
         if (pixels == nullptr) {
             (void)miracle_host_complete_frame(
-                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, 0, 0,
+                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, nullptr, 0,
+                0, 0,
                 err_code != 0 ? static_cast<MiraHostStatus>(err_code) : MIRA_HOST_ERR_UNAVAILABLE);
             return;
         }
@@ -779,15 +784,26 @@ void JNICALL native_complete_frame(JNIEnv *env, jclass /*clazz*/, jlong correlat
             env->GetByteArrayElements(pixels, &is_copy));
         if (bytes == nullptr) {
             (void)miracle_host_complete_frame(
-                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, 0, 0,
-                MIRA_HOST_ERR_CAPACITY);
+                static_cast<std::uint64_t>(correlation), false, 0, 0, 0, nullptr, 0, nullptr, 0,
+                0, 0, MIRA_HOST_ERR_CAPACITY);
             return;
+        }
+        // 编码载荷（PNG）：拷贝后传入（登记方在 host_abi_impl 内复制，此处出参即可）。
+        std::vector<std::uint8_t> encoded_bytes;
+        if (encoded != nullptr) {
+            const jsize encoded_length = env->GetArrayLength(encoded);
+            if (encoded_length > 0) {
+                encoded_bytes.resize(static_cast<std::size_t>(encoded_length));
+                env->GetByteArrayRegion(encoded, 0, encoded_length,
+                                        reinterpret_cast<jbyte *>(encoded_bytes.data()));
+            }
         }
         const MiraHostStatus status = miracle_host_complete_frame(
             static_cast<std::uint64_t>(correlation), ok != 0, static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height), static_cast<std::uint32_t>(rotation), bytes,
-            static_cast<std::uint64_t>(length), static_cast<std::uint64_t>(begin_ns),
-            static_cast<std::uint64_t>(end_ns),
+            static_cast<std::uint64_t>(length),
+            encoded_bytes.empty() ? nullptr : encoded_bytes.data(), encoded_bytes.size(),
+            static_cast<std::uint64_t>(begin_ns), static_cast<std::uint64_t>(end_ns),
             err_code != 0 ? static_cast<MiraHostStatus>(err_code) : MIRA_HOST_ERR_UNAVAILABLE);
         env->ReleaseByteArrayElements(pixels, reinterpret_cast<jbyte *>(const_cast<std::uint8_t *>(bytes)),
                                       JNI_ABORT);
@@ -1138,7 +1154,7 @@ const JNINativeMethod kNativeBridgeMethods[] = {
 };
 
 const JNINativeMethod kHostBridgeMethods[] = {
-    {"nativeCompleteFrame", "(JIIII[BJJI)V",
+    {"nativeCompleteFrame", "(JIIII[B[BJJI)V",
      reinterpret_cast<void *>(&native_complete_frame)},
     {"nativeCompleteInput", "(JIII)V", reinterpret_cast<void *>(&native_complete_input)},
     {"nativeNotifyEpochChanged", "()V", reinterpret_cast<void *>(&native_notify_epoch_changed)},

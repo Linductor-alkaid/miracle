@@ -59,25 +59,27 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
 
 ## 关键实现决策（本文件冻结，实现遵循）
 
-1. **模型栈组装与传输边界**：mira 安装包未随包导出 `adapters/net` 头文件
-   （`SocketHttpTransport`/`MbedTlsChannelFactory` 有库无头，登记
-   `MIR-20260906-006`）。P3 经**公共 `IHttpTransport` 接口**实现宿主传输：C++ 侧薄适配
+1. **模型栈组装与传输边界**：P3 开工时 mira 安装包未随包导出 `adapters/net` 头文件
+   （登记 `MIR-20260906-006`），经**公共 `IHttpTransport` 接口**实现宿主传输：C++ 侧薄适配
    （请求/响应封送 + 有界协作等待），HTTPS 执行在 Kotlin（`HttpURLConnection`，系统
    信任库，无新增依赖）。方言映射、decision schema 校验、SSE、预算/准入全部保留在 mira
    `OpenAiCompatibleProvider`/`ModelGateway`（不重复实现上游语义）。传输阻塞等待发生在
    loop worker（gateway.infer 同步链）：C++ 条件变量 50ms 轮询 `OperationContext::
    cancelled()` 与 Kotlin 完成标志；取消时通知 Kotlin 侧 `disconnect()`。SSRF 姿态与
    `TransportLimits` 默认一致：仅 https、拒绝私有/回环/链路本地地址、响应字节上限。
-2. **闭环图像路径的上游阻断（MIR-20260906-007）**：`AgentLoop::build_request` 将截图
-   artifact 以 `media_type="application/octet-stream"` + 原始 RGBA 字节构建 `ImagePart`
-   （`agent_loop.cpp`），wire mapper 生成 `data:application/octet-stream;base64,…` 数据
-   URL——真实 OpenAI 兼容 VLM 拒绝该格式；且 `AndroidHostAdapter` 工件存储私有、无公共
-   读取 API，宿主无法向 provider 提供截图字节。结论：**真实 VLM 闭环在本 lock 上不可
-   达**，属公共 API 表面不足，登记台账回流；P3 交付的替代验证：
-   (a) 连通性自检（文本-only 请求，无 ImagePart，真实端点全链）；
-   (b) 闭环干跑（脚本化 `IHttpTransport` 返回合法 decision JSON，真实 observe/act）。
-   真实任务补跑条件：mira 修复 artifact 媒体类型/读取路径 → lock 升级（独立变更，重跑
-   P0–P2 验收）→ 用户配置真实端点 → 按 P5 矩阵取证。
+   lock 升级至 mira `cbed6ad` 后官方 transport 头已随包导出（MIR-006 关闭）；Kotlin
+   传输保留（公共扩展点 + 系统信任库），切换官方 socket/mbedtls 栈为后续独立变更。
+2. **闭环图像路径（开工时受 `MIR-20260906-007` 阻断；lock 升级后解除）**：开工基线
+   （mira `16e419e`）的 `AgentLoop::build_request` 将截图 artifact 以
+   `media_type="application/octet-stream"` + 原始 RGBA 字节构建 `ImagePart`，真实端点拒绝
+   且宿主无工件读取路径——真实 VLM 闭环不可达，P3 以 (a) 连通性自检（文本-only）与
+   (b) 闭环干跑（脚本化 transport）双轨替代验证。mira `cbed6ad`（DEC-012/013）后，
+   Miracle 按宿主编码语义落地：Kotlin 截屏同步 PNG 编码 → 帧完成以原始字节 sha256 为键
+   登记（`frame_encoding.hpp`）→ 注入 loop 的 `HostFrameStore` 在 commit 时重新发布为
+   `image/png` 工件（容量 128 MiB，原始帧转码后回收；无登记载荷时原始帧如实按
+   `image/x-host-frame` 发布）→ `StoreArtifactSource` 供方言层生成 `data:image/png`
+   数据 URL；干跑与真实路径共用该链路。真实任务（≥3 类）补跑条件：真机连接 + 用户
+   配置真实端点 → 按 P5 矩阵取证。
 3. **并发与生命周期**：`LoopRuntime`（bridge 层）持有唯一 Executor（min/max 4 线程、
    队列 128）与整套 mira 对象；`AgentLoop::run` 经 `submit_cancellable` 提交（StopToken
    → `OperationContext.cancellation_requested`），bridge 自研代码零线程创建。Takeover
@@ -174,8 +176,9 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
 
 | 风险 | 对策 |
 | --- | --- |
-| 真实 VLM 闭环被 MIR-007 阻断（图像 artifact 媒体类型/读取路径） | 台账登记 + 连通性/干跑双轨替代验证；补跑条件明确（lock 升级 + 端点配置）；P5 报告引用 |
-| MIR-20260906-006：mira 安装包无传输头文件 | 宿主实现公共 `IHttpTransport`（设计内扩展点）；上游修复后可切换官方 transport（独立变更） |
+| 真实 VLM 闭环图像路径（原 MIR-007 阻断） | lock 升级 mira `cbed6ad` + 宿主编码链路（决策 2）解除；真机 ≥3 类任务取证待补跑（设备 + 真实端点） |
+| 官方 transport 头未导出（原 MIR-006） | 上游已导出（`cbed6ad`）；Kotlin 传输保留（公共扩展点），切换官方栈为后续独立变更 |
+| PNG 编码失败/未登记（宿主编码链路） | fail-open 仅影响 wire 格式：原始帧按 `image/x-host-frame` 如实发布（过方言 image 门，真实端点可能拒——上游既定边界）；编码异常落日志可见 |
 | Kotlin HttpURLConnection 长阻塞 + 取消时延 | 异步注册表（容量 8，超限快速失败）+ disconnect() + C++ 50ms 协作轮询；超时与 deadline 取 min |
 | Executor 死锁（loop worker 阻塞等待同池结算） | 4 线程池 + P1/P2 已验证的 submit/wait 模式；干跑矩阵含取消路径；异常路径 shutdown(true) 排空 |
 | 确认弹窗无人响应阻塞任务 | 60s 到期自动 REJECTED(side=0)；任务 deadline 与确认窗口取 min；takeover 立即失效 |
@@ -199,9 +202,9 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
   （①Completed+靶点计数 ②MaxSteps ③取消→Cancelled ④R3 正负向）、takeover+
   RELEASE_ALL、连通性自检（用户提供真实端点）、悬浮球交互（拖动/长按/展开/降级）。
   负责人：用户；条件：设备连接 + 四项授权 + P1/P2 自检通过 + 配置端点。
-- [ ] 真机：≥3 类真实任务端到端（可行性 §8 P3 验收）——**上游阻断**（MIR-007），
-  补跑条件：mira 修复图像 artifact 路径 + lock 升级（独立变更）+ 重跑 P0–P2 验收 +
-  真实端点。
+- [ ] 真机：≥3 类真实任务端到端（可行性 §8 P3 验收）——上游阻断已解除（mira `cbed6ad`
+  + 宿主 PNG 编码链路，2026-09-06 lock 升级），补跑条件：设备连接 + 真实端点配置 +
+  P1/P2 自检通过。
 - [x] 文档同步完成（总计划、CHANGELOG、设计、台账、验证记录）。
 
 ## 验证记录
@@ -254,3 +257,25 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
   "host bound"）、逐场景取证（logcat + 截图存 `build/p3-device-evidence/`）与
   悬浮球长按 takeover（`input swipe` ≥900ms）。ColorOS 投影对话框与 R3 确认弹窗
   需人工点击（P2 经验：系统对话框不可脚本化）。
+
+2026-09-06（mira lock 升级独立变更：`16e419e` → `cbed6ad`，上游反馈两轮落地后的
+适配）：
+
+- 判断依据：mira 按 miracle 台账完成两轮修复（PR [#16]/[#17]，DEC-012/013），覆盖
+  MIR-001/003/004/005/006/007 与 lease 统计口径；P3 登记的真实任务补跑前置（lock
+  升级）满足，按计划决策 2 执行本变更。MIR-002（ToolProposals）上游未动，保持 Open。
+- lock 与安装：`tools/mira.lock` commit 更新为 `cbed6ad`（含 net 头导出）；
+  `tools/install-mira.sh --force` 全新构建安装通过（NDK 26.3，arm64-release）。
+- 宿主编码链路（决策 2 落地）：`frame_encoding.hpp`（原始字节 sha256 为键的有界
+  登记，容量 4 帧）；`HostFrameStore`（注入 adapter，commit 时把登记的 PNG 重新发布
+  为 `image/png` 工件、原始工件回收；未命中回退如实标注）；`StoreArtifactSource`
+  （wire 字节回读，替代原 `FailClosedArtifactSource`——后者保留用于连通性自检）；
+  Kotlin `ScreenCaptureProvider` 截屏同步 PNG 编码（锁外，`Bitmap.compress`）经
+  `nativeCompleteFrame` 新增 `encoded` 参数上投。
+- 其他适配：`inputTestDispatch` adapter 路径接通 `InputEvent.duration_ms`（MIR-005
+  workaround 移除）；`close()` 补 scripted 模式 `kotlin_transport` 空指针防护（既有
+  缺陷，干跑矩阵真机补跑前修复）；降采样注释按 MIR-004 关闭更新（容量解除，现为
+  载荷大小策略，采集档不变）。
+- 验证：`./gradlew assembleDebug lintDebug testDebugUnitTest` 全绿（单测 62/62）；
+  native 目标针对新安装前缀重编译零警告；零线程创建/无 GlobalScope grep 通过。
+  真机项（干跑矩阵、连通性、真实任务 ≥3 类）仍待设备连接补跑，不标记完成。
