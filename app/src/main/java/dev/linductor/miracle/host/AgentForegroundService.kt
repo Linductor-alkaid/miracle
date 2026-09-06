@@ -99,18 +99,24 @@ class AgentForegroundService : Service() {
                 return START_NOT_STICKY
             }
         }
-        // 幂等：已绑定的宿主忽略重复 start（Activity 重建可能重放授权结果，
-        // 而 consent data 只能消费一次，重复消费必然失败且无意义）。
-        if (provider != null) {
-            return START_NOT_STICKY
-        }
+        // 无授权数据的重复 start（Activity 重建重放且未携带结果）忽略。
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE) ?: Int.MIN_VALUE
         val resultData = intent?.ParcelableExtra<Intent>(EXTRA_RESULT_DATA)
         if (resultCode == Int.MIN_VALUE || resultData == null) {
+            if (provider != null) {
+                return START_NOT_STICKY
+            }
             _state.value = HostState.Failed
             _stateMessage.value = "缺少投影授权结果"
             stopSelf()
             return START_NOT_STICKY
+        }
+        // 携带新授权数据＝用户主动再次授权（如换采集范围重跑自检）。Android 14+
+        // 同一时刻仅允许一个活跃投影，旧授权可能随新授权即刻失效——必须拆旧建新，
+        // 不能沿用旧会话（否则"整屏"授权被静默丢弃、实际仍在采旧范围）。
+        if (provider != null) {
+            Log.i(TAG, "re-consent: rebuilding projection session")
+            teardown()
         }
 
         startForegroundWithType()
@@ -121,6 +127,11 @@ class AgentForegroundService : Service() {
             projection = active
             active.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
+                    // 仅当前投影的 onStop 生效：重建会话时旧投影 stop 的迟到回调
+                    // 不拆新管线（teardown 同步执行后回调才经主线程派发）。
+                    if (projection !== active) {
+                        return
+                    }
                     Log.i(TAG, "media projection stopped")
                     _state.value = HostState.Stopped
                     _stateMessage.value = "媒体投影已停止（授权被撤销或会话结束）"
