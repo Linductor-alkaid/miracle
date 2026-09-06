@@ -1,5 +1,7 @@
 # Miracle JNI bridge：P1 起链接 Mira::android_adapter（Host ABI v1 符号由
-# host_abi_impl.cpp 在本库内提供）；transport/state_store 于 P3 增量接入。
+# host_abi_impl.cpp 在本库内提供）；P3 起经 Mira::core 公共 API 组装模型网关
+# （OpenAiCompatibleProvider/ModelGateway/AgentLoop/ConfirmationAuthority；传输为
+# 宿主自实现——安装包未导出官方 transport 头，见台账 MIR-20260906-006）。
 cmake_minimum_required(VERSION 3.22)
 project(miracle_host LANGUAGES CXX)
 
@@ -21,6 +23,7 @@ find_package(Mira 0.1 CONFIG REQUIRED)
 
 add_library(miracle_host SHARED
     runtime_glue.cpp
-    host_abi_impl.cpp)
+    host_abi_impl.cpp
+    loop_runtime.cpp)
 target_compile_options(miracle_host PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(miracle_host PRIVATE Mira::core Mira::android_adapter log)

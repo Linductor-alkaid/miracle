@@ -24,6 +24,10 @@ MiraHostStatus miracle_host_complete_input(std::uint64_t correlation, MiraHostSt
 // epoch 递增并触发能力变化回调（旋转/投影重建时由 Kotlin 调入）。
 void miracle_host_notify_epoch_changed();
 
+// P3 R3 确认回流：allow=true 时按停放参数派发平台；false 时结算 REJECTED(side=0)。
+// 返回非 OK＝correlation 未停放或宿主不可用（调用方如实上报）。
+MiraHostStatus miracle_host_confirm_release(std::uint64_t correlation, bool allow);
+
 // 调试统计 JSON（unknown/late/cancelled/outstanding_leases）。
 void miracle_host_debug_stats_json(std::string &out);
 
