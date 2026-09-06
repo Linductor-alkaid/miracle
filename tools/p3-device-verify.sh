@@ -67,9 +67,10 @@ scenario_setup() {
     # 悬浮窗（appops；ColorOS 16 可能拒绝 shell 设置——降级为人工引导，不阻断）
     adb_cmd shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow 2>/dev/null || \
         echo "!! appops 被系统拒绝：悬浮球需在设置页手动授权（仅影响球体交互取证）" 
-    # 无障碍（install -r 会清除，重启服务）
+    # 无障碍（install -r 会清除，重启服务）。组件串必须用规范全名：ColorOS 对
+    # 未知组件静默拒绝（写入失败且无报错，2026-09-06 实测）。
     adb_cmd shell settings put secure enabled_accessibility_services \
-        "$PKG/.host.MiracleAccessibilityService"
+        "$PKG/$PKG.host.MiracleAccessibilityService"
     adb_cmd shell settings put secure accessibility_enabled 1
     sleep 2
     echo "-- 无障碍状态：$(adb_cmd shell settings get secure enabled_accessibility_services | tr -d '\r')"
