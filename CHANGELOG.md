@@ -109,3 +109,6 @@
   焦点重试窗口 500ms→2s（有界）；焦点子树内有界解析可编辑节点（覆盖容器聚焦
   的 Compose 无障碍暴露差异）；自检页 type 前确定性聚焦辅助。真机复验：用户式
   滚动布局与 Done 后布局均 ✅（type=Completed、零告警、home 达 launcher）。
+- 上游反馈：台账 5 条 MIR 条目、`leases_released` 统计观察项（自 MIR-004 备注
+  拆出）与 android-host-abi.md 证据回填拟稿已提交 mira issue #7–#13；台账与
+  拟稿回填对应 issue 链接（提交前证据均经 mira `16e419e` 源码复核）。
