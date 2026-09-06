@@ -194,7 +194,23 @@ PJE110 / Android 16 / API 36 已连接过）。
 - 测试：新增 `CaptureSelfTestCoordinatorTest`（8 例：首跑、再次授权重跑、在途折叠
   为一次重跑、拒绝、Bound 补跑与终态不重跑、服务超时、失败负载、native 异常）；
   `testDebugUnitTest assembleDebug lintDebug` 全绿（62/62）。
-- 待真机补跑（环境限制：设备未连接，不得标记完成；负责人：Linductor）：整屏与单应用
-  双模式矩阵复验——首跑呈现"环境自检通过"、同进程内"再次自检"换模式重跑成功且
-  帧预览刷新、录屏指示随会话、force-stop 干净退出；补跑后回填本节与
-  `docs/compatibility/oneplus-ace3.md`。
+- 真机矩阵复验（2026-09-06 16:18–16:27，OnePlus Ace 3 / Android 16 / API 36，
+  证据等级 Runtime verified(device)）：
+  - 场景 A·单应用首跑：授权（ColorOS 三步）→ bind 后 ~450ms 出结果，两帧 640×1406
+    epoch=1（252.0/192.2ms），UI"✅ 环境自检通过"，bridge/host 违规计数全 0，
+    shutdown Completed；
+  - 场景 B·同进程"再次自检"换整屏（原故障路径）：自检通过，**epoch=2**（投影会话
+    重建生效），帧预览为完整主屏幕（整屏采集生效），违规计数全 0；用户侧同步观察
+    通过、延时不长；
+  - 场景 C·进程重启后整屏授权：host bound 16:24:54.346 → `ok:true` 16:24:55.336，
+    **bind→结果 ~1.0s**（帧 508.2/473.5ms）；
+  - 负向与生命周期：FATAL/ANR 计数 0；force-stop 干净退出；重启后 P1 卡 Idle、
+    按钮可用，无搁浅残留。
+  - ColorOS 授权步骤数差异：单应用三步（确认→选择器→选应用），**整屏四步**（确认→
+    选择器→整个屏幕→"屏幕共享"再次确认）；授权期间 UI 呈 Requesting（"等待投影
+    授权…"），等待时长由对话框点击节奏决定，与 app 无关。
+  - 取证方法注记：本机 logcat 缓冲区分钟级滚动（证据须实时落盘）；会话中发现屏幕
+    截图读取出现过期缓存复用（同 URL 返回旧图），时间线判定以 logcat 为准、截图
+    以 md5 区分新鲜度。
+  - 构建基线：上述复验 APK 含 mira lock 升级 `cbed6ad`（宿主 PNG 编码工件链，
+    帧日志 `png=` 字段即其输出）与本次三项修复，合并验证通过。
