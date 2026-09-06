@@ -89,6 +89,9 @@ class MainActivity : ComponentActivity() {
         AgentRuntime.attach(applicationContext)
         pendingAutoScenario = intent?.getStringExtra(EXTRA_AUTO_SCENARIO)
             ?.takeIf { it in AUTO_SCENARIOS }
+        if (pendingAutoScenario != null) {
+            autoScenarioSequence += 1
+        }
         setContent {
             MaterialTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -117,9 +120,11 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         // 真机取证入口：adb shell am start --es auto_scenario <name>（见
         // tools/p3-device-verify.sh）；仅接受已知场景名，其余忽略。
-        pendingAutoScenario = intent.getStringExtra(EXTRA_AUTO_SCENARIO)
-            ?.takeIf { it in AUTO_SCENARIOS }
-        if (pendingAutoScenario != null) {
+        val scenario = intent.getStringExtra(EXTRA_AUTO_SCENARIO)?.takeIf {
+            it in AUTO_SCENARIOS
+        }
+        if (scenario != null) {
+            pendingAutoScenario = scenario
             autoScenarioSequence += 1
         }
     }
@@ -170,14 +175,12 @@ class MainActivity : ComponentActivity() {
             listOf("complete", "max_steps", "cancel", "r3", "connectivity")
     }
 
-    /** 待执行的取证场景（onCreate/onNewIntent 写入；UI 组合后由 MiracleApp 消费）。 */
-    @Volatile
-    var pendingAutoScenario: String? = null
+    /** 待执行的取证场景（Compose State：onNewIntent 变更驱动重组消费）。 */
+    var pendingAutoScenario: String? by androidx.compose.runtime.mutableStateOf(null)
         private set
 
     /** 场景序号（onNewIntent 递增，驱动 Compose 重复触发同名场景）。 */
-    @Volatile
-    var autoScenarioSequence: Int = 0
+    var autoScenarioSequence: Int by androidx.compose.runtime.mutableIntStateOf(0)
         private set
 }
 
