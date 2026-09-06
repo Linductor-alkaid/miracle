@@ -166,3 +166,35 @@ PJE110 / Android 16 / API 36 已连接过）。
   ColorOS 不同，自动化脚本需按厂商定位。
 - 结论：印证"代码一份、验证多台"的设备策略；兼容性矩阵新增
   `huai-ada-al00.md`（Huawei ADA-AL00，Runtime verified(device)）。
+
+2026-09-06（P1 缺陷修复：授权后自检停留"正在执行环境自检…"，UI 状态机搁浅）：
+
+- 现象（用户报告，OnePlus Ace 3）：投影授权选择"整个屏幕"后，录屏指示出现、两帧
+  预览已输出，但 P1 卡片停留 Running，既不呈现通过也不呈现失败。
+- 根因（代码走查，设备未接入无法抓栈，依据链路穷举）：
+  1. native 侧不存在无界等待：mira `observe` 受 deadline+200ms 宽限约束
+     （`android_host_adapter.cpp` wait_for_outcome），epoch 失配返回 StaleObservation
+     错误，宿主 stop/destroy 与 lease 等待均有界——首跑最坏 ~25s 必然返回终态 JSON；
+  2. 搁浅在 UI 状态机：`CaptureViewModel.selfTestLaunched` 为进程级一次性守卫而
+     `_state` 为 ViewModel 实例私有，进程内第二次授权（"再次自检"按钮——换选
+     "整个屏幕"重试即此路径）时 `markConsumed()` 先置 Running 再被守卫早退，无任何
+     完成方；用户看到的两帧是 `HostBridge.frames` 单例中上一轮（单应用投影）残留。
+     "整屏"与故障为伴随关系（第二次尝试），非因果；Activity 重建场景（本计划遗留
+     改进项）属同族缺陷。
+- 修复（均在 miracle 自研层）：
+  1. `fix(ui)`：自检状态机重构为进程级 `CaptureSelfTestCoordinator`（状态共享 +
+     在途去重 + 重跑折叠），"再次自检"重新执行完整 native 自检；重建实例投影同一
+     状态流，不再搁浅于 Running；
+  2. `fix(host)`：`AgentForegroundService` 对携带新授权数据的重复 start 拆旧建新
+     重建投影会话（Android 14+ 同一时刻仅一个活跃投影，旧授权随新授权失效），
+     并以投影身份守卫拦截旧投影的迟到 onStop；不再静默丢弃再次授权；
+  3. `fix(host)`：`ScreenCaptureProvider` 取帧引用与像素拷贝并入同一 frameLock
+     临界区，消除"await 返回后、拷贝前持帧被 listener 关闭"竞争——整屏模式录屏
+     指示动画使帧持续翻动，该窗口不再是罕见路径。
+- 测试：新增 `CaptureSelfTestCoordinatorTest`（8 例：首跑、再次授权重跑、在途折叠
+  为一次重跑、拒绝、Bound 补跑与终态不重跑、服务超时、失败负载、native 异常）；
+  `testDebugUnitTest assembleDebug lintDebug` 全绿（62/62）。
+- 待真机补跑（环境限制：设备未连接，不得标记完成；负责人：Linductor）：整屏与单应用
+  双模式矩阵复验——首跑呈现"环境自检通过"、同进程内"再次自检"换模式重跑成功且
+  帧预览刷新、录屏指示随会话、force-stop 干净退出；补跑后回填本节与
+  `docs/compatibility/oneplus-ace3.md`。

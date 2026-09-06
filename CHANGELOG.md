@@ -44,11 +44,26 @@
 - `AgentForegroundService`：通知增加停止/接管 action、文案随会话状态联动；悬浮球随
   服务生命周期显示（v1）。
 
+### 修复
+
+- P1 环境自检停留"正在执行环境自检…"不呈现结果（用户报告：整屏授权后录屏指示出现、
+  两帧已输出）：根因为 UI 状态机搁浅——自检启动守卫进程级一次性而结果状态按
+  ViewModel 实例私有，进程内第二次授权（"再次自检"）置 Running 后无完成方。自检
+  状态机重构为进程级 `CaptureSelfTestCoordinator`（状态共享、在途去重、重跑折叠），
+  "再次自检"重新执行 native 自检，Activity 重建实例投影同一状态流；连带修复前台
+  服务对携带新授权数据的重复 start 静默丢弃（改为拆旧建新重建投影会话，含旧投影
+  迟到 onStop 守卫），以及截屏取帧与像素拷贝并入同一 frameLock 临界区（消除整屏
+  帧翻动下持帧被 listener 关闭的竞争）。详见 docs/plans/p1-screen-capture.md
+  2026-09-06 验证记录；真机双模式矩阵复验待设备接入补跑。
+
 ### 验证
 
 - 本地门禁：`assembleDebug lintDebug testDebugUnitTest` 全绿（单测 54/54，新增 34，含提供商预设 6）；
   native 目标 NDK 独立编译零警告（-Wall -Wextra -Wpedantic）；自研代码零线程创建、
   无 GlobalScope（grep 复核）。
+- P1 自检修复门禁：`testDebugUnitTest assembleDebug lintDebug` 全绿（新增
+  `CaptureSelfTestCoordinatorTest` 8 例：首跑/重跑/在途折叠/拒绝/补跑/服务超时/
+  失败负载/异常路径，合计 62/62）。
 - 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接；真实任务另受
   MIR-20260906-007 阻断）：补跑条件见 docs/plans/p3-loop-mvp.md。
 
