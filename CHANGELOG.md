@@ -26,9 +26,10 @@
 - 配置与凭据：设置页（端点/前缀/模型/方言/步数上限）；API key 经 AndroidKeyStore
   AES-256-GCM 加密落 filesDir（JVM 可注入引擎已单测；AndroidKeyStore 版真机验证）。
 - 提供商预设（P3 补充需求）：设置页内置主流 OpenAI 兼容提供商目录（OpenAI/DeepSeek/
-  智谱 GLM/Moonshot Kimi/阿里云百炼 Qwen/OpenRouter），一键套用端点/前缀/方言/模型
-  建议值，仅需填写 API key；mira 公共 API 无提供商注册表，预设按各厂商公开兼容端点
-  配置（Configured 级），互操作以连通性自检为准。
+  智谱 GLM/Moonshot Kimi/阿里云百炼 Qwen/OpenRouter/MiniMax/SiliconFlow），一键套用
+  端点/前缀/方言/模型建议值，仅需填写 API key；mira 公共 API 无提供商注册表——
+  MiniMax/SiliconFlow 取自 mira docs/model_provider 上游在用配置，其余按各厂商公开
+  兼容端点配置（Configured 级），互操作以连通性自检为准；上游配置凭据不入本仓库。
 - 双前端：任务台（新目标/会话卡/时间线/停止/接管）、设置页、Onboarding 引导卡、
   底部三页导航（任务/自检/设置）；悬浮球（状态环相位映射/拖动/单击展开 Compose 面板/
   长按 ≥600ms takeover）+ 常驻通知停止/接管 action 与状态文案联动。

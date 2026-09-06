@@ -155,10 +155,12 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
   步数/敏感名单/悬浮窗引导）、Onboarding、P3 自检卡（连通性 + 干跑）。
   补充需求（2026-09-06，真机补跑会话）：设置页内置提供商预设目录
   （`ProviderPresets`：OpenAI/DeepSeek/智谱 GLM/Moonshot Kimi/阿里云百炼
-  Qwen/OpenRouter），FilterChip 一键套用端点/前缀/方言/模型建议值，用户仅需填写
-  API key；mira 公共 API 无提供商注册表（仅 `OpenAiCompatibleProvider` + 两方言），
-  预设按各厂商公开 OpenAI 兼容端点配置（Configured 级），互操作以连通性自检为准；
-  单测覆盖目录契约与套用/匹配语义（6 项）。
+  Qwen/OpenRouter/MiniMax/SiliconFlow——后两家端点/方言/模型名取自 mira
+  docs/model_provider 上游在用配置，凭据不入本仓库），FilterChip 一键套用端点/
+  前缀/方言/模型建议值，用户仅需填写 API key；mira 公共 API 无提供商注册表
+  （仅 `OpenAiCompatibleProvider` + 两方言），其余预设按各厂商公开 OpenAI 兼容
+  端点配置（Configured 级），互操作以连通性自检为准；单测覆盖目录契约与
+  套用/匹配语义（6 项）。
 - [x] `P3-08` 悬浮球与面板：状态环/拖动/单击展开/长按接管/面板（新任务/停止/接管/
   最近动作）；与通知、任务台状态同源。
 - [x] `P3-09` 测试与门禁：单测（策略表全分支/确认绑定与负向（nonce 重放、错误

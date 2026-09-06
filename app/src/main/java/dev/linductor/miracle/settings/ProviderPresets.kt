@@ -8,10 +8,12 @@ package dev.linductor.miracle.settings
  * OpenAI 兼容端点（model_provider.hpp / model_profile.hpp）。本目录据此把
  * 主流厂商的公开兼容端点做成一键预设——套用后仅剩 API key 需要用户填写。
  *
- * 证据口径（对齐 mira CapabilityEvidence）：预设条目为 Configured 级
- * （端点/前缀/方言按各厂商公开的 OpenAI 兼容文档填写），与任一厂商的实际
+ * 证据口径（对齐 mira CapabilityEvidence）：MiniMax/SiliconFlow 依据 mira
+ * docs/model_provider 的在用配置（上游已验证）；其余条目为 Configured 级
+ * （端点/前缀/方言按各厂商公开的 OpenAI 兼容文档填写）。与任一厂商的实际
  * 互操作以设置页"模型连通性自检"结果为准，不做已验证宣称。
- * 默认模型名是建议值，保存前可任意修改。
+ * 默认模型名是建议值，保存前可任意修改。上游配置中的凭据不进入本仓库：
+ * 预设仅含端点/前缀/方言/模型名，API key 一律由设置页填写并加密存储。
  */
 data class ProviderPreset(
     val id: String,
@@ -87,6 +89,24 @@ object ProviderPresets {
             apiPrefix = "/api/v1",
             dialect = "chat",
             defaultModel = "openrouter/auto",
+        ),
+        // 以下两条端点/方言/模型名取自 mira docs/model_provider 的在用配置
+        // （上游已验证；凭据不入本仓库）。
+        ProviderPreset(
+            id = "minimax",
+            displayName = "MiniMax",
+            endpoint = "https://api.minimaxi.com",
+            apiPrefix = "/v1",
+            dialect = "responses",
+            defaultModel = "MiniMax-M3",
+        ),
+        ProviderPreset(
+            id = "siliconflow",
+            displayName = "SiliconFlow",
+            endpoint = "https://api.siliconflow.cn",
+            apiPrefix = "/v1",
+            dialect = "chat",
+            defaultModel = "Qwen/Qwen3.5-4B",
         ),
     )
 
