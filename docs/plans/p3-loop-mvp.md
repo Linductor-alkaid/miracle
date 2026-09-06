@@ -153,6 +153,12 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
   （startSession/cancel/takeover/状态流/事件流）、FGS 通知 action 与状态文案。
 - [x] `P3-07` UI：任务台（新目标/会话卡/时间线/历史）、设置页（端点/密钥/模型/方言/
   步数/敏感名单/悬浮窗引导）、Onboarding、P3 自检卡（连通性 + 干跑）。
+  补充需求（2026-09-06，真机补跑会话）：设置页内置提供商预设目录
+  （`ProviderPresets`：OpenAI/DeepSeek/智谱 GLM/Moonshot Kimi/阿里云百炼
+  Qwen/OpenRouter），FilterChip 一键套用端点/前缀/方言/模型建议值，用户仅需填写
+  API key；mira 公共 API 无提供商注册表（仅 `OpenAiCompatibleProvider` + 两方言），
+  预设按各厂商公开 OpenAI 兼容端点配置（Configured 级），互操作以连通性自检为准；
+  单测覆盖目录契约与套用/匹配语义（6 项）。
 - [x] `P3-08` 悬浮球与面板：状态环/拖动/单击展开/长按接管/面板（新任务/停止/接管/
   最近动作）；与通知、任务台状态同源。
 - [x] `P3-09` 测试与门禁：单测（策略表全分支/确认绑定与负向（nonce 重放、错误
@@ -177,13 +183,13 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
 
 ## 测试与退出条件
 
-- [x] 单测（JVM，28 项新增，合计 48/48 通过）：R3 策略表全分支（关键词/动作/前台
+- [x] 单测（JVM，34 项新增，合计 54/54 通过）：R3 策略表全分支（关键词/动作/前台
   应用组合/release_all 豁免/摘要脱敏）；确认请求/结算与结果投影解析全分支；配置
   序列化与 https/完整性校验；凭据加密核心 roundtrip + 篡改/短 blob 拒绝（JVM 引擎
   注入，AndroidKeyStore 版真机验证）；端点静态策略（私有/回环/链路本地/IPv6 字面量
   拒绝）。nonce 重放/超期路径经 mira `ConfirmationAuthority.consume` 实现（单测层
   为解析投影；native consume 校验由真机矩阵负向用例覆盖，见补跑项）。
-- [x] 门禁：`./gradlew assembleDebug lintDebug testDebugUnitTest` 全绿（48/48）；
+- [x] 门禁：`./gradlew assembleDebug lintDebug testDebugUnitTest` 全绿（54/54）；
   bridge/host 层零线程创建（grep 通过：`std::thread`/`std::async`/`pthread_create`
   无新增；无 `GlobalScope`）；native 目标独立编译零警告（NDK 26.3，
   -Wall -Wextra -Wpedantic）；异常不穿越 JNI（新增入口全 try/catch）。
@@ -229,8 +235,8 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
     会话生命周期 + R3 查询）；FGS 通知 action（停止/接管）与状态文案联动；悬浮球
     （状态环/拖动/单击展开 Compose 面板/长按 takeover ≥600ms）；任务台/设置/引导页
     与 P3 自检卡（连通性 + 干跑四场景）。
-- 测试与门禁：单测 48/48（新增 28：RiskPolicy 11、LoopEventParser 6、ModelConfig 5、
-  EndpointPolicyCheck 6）；`assembleDebug lintDebug testDebugUnitTest` 全绿；native
+- 测试与门禁：单测 54/54（新增 34：RiskPolicy 11、LoopEventParser 6、ModelConfig 5、
+  EndpointPolicyCheck 6、ProviderPresets 6）；`assembleDebug lintDebug testDebugUnitTest` 全绿；native
   独立编译零警告；零线程创建/无 GlobalScope grep 通过。
 - 实施偏差记录：(a) 配置存储用 SharedPreferences 而非 DataStore（架构 §6 表述为
   DataStore；v1 字段量小，避免新增依赖，架构文档同步注记）；(b) 干跑探针经

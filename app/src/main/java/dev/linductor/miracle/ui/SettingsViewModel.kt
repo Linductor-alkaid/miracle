@@ -55,6 +55,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _state.value = _state.value.copy(apiKeyInput = value, saved = false)
     }
 
+    /** 套用提供商预设（端点/前缀/方言/模型建议值）；API key 输入不受影响。 */
+    fun applyPreset(preset: dev.linductor.miracle.settings.ProviderPreset) {
+        update(preset::applyTo)
+    }
+
     /** 保存；apiKeyInput 留空＝保留既有密钥。 */
     fun save() {
         val current = _state.value

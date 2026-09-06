@@ -25,6 +25,10 @@
   配置完整性，缺项逐项引导）、R3 确认对话框宿主（倒计时/摘要/单次授权）。
 - 配置与凭据：设置页（端点/前缀/模型/方言/步数上限）；API key 经 AndroidKeyStore
   AES-256-GCM 加密落 filesDir（JVM 可注入引擎已单测；AndroidKeyStore 版真机验证）。
+- 提供商预设（P3 补充需求）：设置页内置主流 OpenAI 兼容提供商目录（OpenAI/DeepSeek/
+  智谱 GLM/Moonshot Kimi/阿里云百炼 Qwen/OpenRouter），一键套用端点/前缀/方言/模型
+  建议值，仅需填写 API key；mira 公共 API 无提供商注册表，预设按各厂商公开兼容端点
+  配置（Configured 级），互操作以连通性自检为准。
 - 双前端：任务台（新目标/会话卡/时间线/停止/接管）、设置页、Onboarding 引导卡、
   底部三页导航（任务/自检/设置）；悬浮球（状态环相位映射/拖动/单击展开 Compose 面板/
   长按 ≥600ms takeover）+ 常驻通知停止/接管 action 与状态文案联动。
@@ -41,7 +45,7 @@
 
 ### 验证
 
-- 本地门禁：`assembleDebug lintDebug testDebugUnitTest` 全绿（单测 48/48，新增 28）；
+- 本地门禁：`assembleDebug lintDebug testDebugUnitTest` 全绿（单测 54/54，新增 34，含提供商预设 6）；
   native 目标 NDK 独立编译零警告（-Wall -Wextra -Wpedantic）；自研代码零线程创建、
   无 GlobalScope（grep 复核）。
 - 真机（OnePlus Ace 3）与真实 VLM 任务取证待补跑（实施会话无设备连接；真实任务另受

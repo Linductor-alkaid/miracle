@@ -2,6 +2,7 @@ package dev.linductor.miracle.ui
 
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,8 +11,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -31,6 +34,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.linductor.miracle.consent.SessionGate
 import dev.linductor.miracle.runtime.AgentRuntime
 import dev.linductor.miracle.runtime.LoopEventParser
+import dev.linductor.miracle.settings.ProviderPresets
 
 /**
  * 任务台（前端设计 §4 Home）：新目标输入、当前会话卡（相位/步数/动作计数/
@@ -202,6 +206,36 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text("模型服务（OpenAI 兼容）", style = MaterialTheme.typography.titleSmall)
+                // 提供商预设：一键套用端点/前缀/方言/模型建议值，仅需补 API key
+                // （预设口径见 ProviderPresets：Configured 级，互操作以自检为准）。
+                val matchedPreset = ProviderPresets.match(config)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = matchedPreset == null,
+                        onClick = { /* 自定义＝保持当前手动编辑态 */ },
+                        label = { Text("自定义") },
+                    )
+                    ProviderPresets.ALL.forEach { preset ->
+                        FilterChip(
+                            selected = matchedPreset?.id == preset.id,
+                            onClick = { viewModel.applyPreset(preset) },
+                            label = { Text(preset.displayName) },
+                        )
+                    }
+                }
+                if (matchedPreset != null) {
+                    Text(
+                        "已选预设 ${matchedPreset.displayName}：填写 API key 后保存即可使用" +
+                            "（模型名与字段可再修改）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 OutlinedTextField(
                     value = config.endpoint,
                     onValueChange = { value -> viewModel.update { it.copy(endpoint = value) } },
