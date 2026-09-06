@@ -287,8 +287,10 @@ class HttpTransportBinding {
             return // 已取消/结算：迟到正文丢弃
         }
         val headers = JSONArray()
-        for ((name, values) in headerFields) {
-            if (name == null || values.isEmpty()) {
+        for ((rawName, values) in headerFields) {
+            // HttpURLConnection 用 null 键承载状态行；显式可空化再过滤。
+            val name: String? = rawName
+            if (name.isNullOrEmpty() || values.isEmpty()) {
                 continue
             }
             headers.put(JSONObject().put("name", name).put("value", values.joinToString(", ")))

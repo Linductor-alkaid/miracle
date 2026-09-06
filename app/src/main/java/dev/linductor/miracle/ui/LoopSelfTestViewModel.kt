@@ -70,6 +70,7 @@ class LoopSelfTestViewModel : ViewModel() {
         _connectivity.value = ConnectivityState.Running
         viewModelScope.launch(Dispatchers.IO) {
             val json = AgentRuntime.modelConnectivity(context)
+            android.util.Log.i("miracle/verify", "connectivity $json")
             _connectivity.value = ConnectivityState.Done(json)
         }
     }
@@ -112,6 +113,10 @@ class LoopSelfTestViewModel : ViewModel() {
                 .toString()
             val error = AgentRuntime.startSession(context, goal, script = config)
             if (error != null) {
+                android.util.Log.i(
+                    "miracle/verify",
+                    "dryrun scenario=$scenario outcome=OpenFailed ok=false detail=$error",
+                )
                 _dryRun.value = DryRunState.Done(scenario, "OpenFailed", false, error)
                 return@launch
             }
@@ -125,6 +130,10 @@ class LoopSelfTestViewModel : ViewModel() {
             val closeSummary = AgentRuntime.closeSession() ?: "{}"
             val (closeOk, shutdown, _) = LoopEventParser.parseCloseSummary(closeSummary)
             if (terminal == null) {
+                android.util.Log.i(
+                    "miracle/verify",
+                    "dryrun scenario=$scenario outcome=Timeout ok=false",
+                )
                 _dryRun.value = DryRunState.Done(scenario, "Timeout", false, "60s 内未观察到终态")
                 return@launch
             }
@@ -142,6 +151,10 @@ class LoopSelfTestViewModel : ViewModel() {
                 append(" · 关闭 $shutdown")
                 terminal.summary.takeIf { it.isNotBlank() }?.let { append(" · $it") }
             }
+            android.util.Log.i(
+                "miracle/verify",
+                "dryrun scenario=$scenario outcome=${terminal.outcome} ok=$ok detail=$detail",
+            )
             _dryRun.value = DryRunState.Done(scenario, terminal.outcome, ok, detail)
         }
     }

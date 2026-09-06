@@ -238,3 +238,11 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
   语义等价）。
 - 真机项与真实任务验收未执行（无设备连接/上游阻断），补跑条件见"测试与退出条件"，
   不标记完成。
+- 补跑工具就绪（2026-09-06 追加）：闭环事件/结果证据流落 logcat（`miracle/loop`
+  全事件 JSON、`miracle/verify` 场景结论）；场景可经 `am start --es
+  dev.linductor.miracle.extra.AUTO_SCENARIO <complete|max_steps|cancel|r3|connectivity>`
+  脚本化触发；`tools/p3-device-verify.sh [serial] [scenario...]` 一键完成安装、
+  授权（通知 pm grant/悬浮窗 appops/无障碍 settings put）、投影绑定等待（logcat
+  "host bound"）、逐场景取证（logcat + 截图存 `build/p3-device-evidence/`）与
+  悬浮球长按 takeover（`input swipe` ≥900ms）。ColorOS 投影对话框与 R3 确认弹窗
+  需人工点击（P2 经验：系统对话框不可脚本化）。

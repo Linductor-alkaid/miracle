@@ -87,11 +87,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         AgentRuntime.attach(applicationContext)
+        pendingAutoScenario = intent?.getStringExtra(EXTRA_AUTO_SCENARIO)
+            ?.takeIf { it in AUTO_SCENARIOS }
         setContent {
             MaterialTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MiracleApp(
                         modifier = Modifier.padding(innerPadding),
+                        autoScenario = pendingAutoScenario,
+                        autoScenarioSequence = autoScenarioSequence,
+                        onAutoScenarioConsumed = { pendingAutoScenario = null },
                         onRequestProjection = {
                             captureViewModel.begin()
                             requestProjectionWithNotification()
@@ -106,6 +111,17 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // 授权返回后刷新准入状态（无障碍/悬浮窗/通知在系统设置页变更）。
         sessionViewModel.refreshGate(applicationContext)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 真机取证入口：adb shell am start --es auto_scenario <name>（见
+        // tools/p3-device-verify.sh）；仅接受已知场景名，其余忽略。
+        pendingAutoScenario = intent.getStringExtra(EXTRA_AUTO_SCENARIO)
+            ?.takeIf { it in AUTO_SCENARIOS }
+        if (pendingAutoScenario != null) {
+            autoScenarioSequence += 1
+        }
     }
 
     /** 先确保通知权限（FGS 常驻通知依赖），再发起系统投影授权。 */
@@ -147,6 +163,22 @@ class MainActivity : ComponentActivity() {
     private val sessionViewModel: SessionViewModel by lazy {
         androidx.lifecycle.ViewModelProvider(this)[SessionViewModel::class.java]
     }
+
+    companion object {
+        const val EXTRA_AUTO_SCENARIO = "dev.linductor.miracle.extra.AUTO_SCENARIO"
+        val AUTO_SCENARIOS =
+            listOf("complete", "max_steps", "cancel", "r3", "connectivity")
+    }
+
+    /** 待执行的取证场景（onCreate/onNewIntent 写入；UI 组合后由 MiracleApp 消费）。 */
+    @Volatile
+    var pendingAutoScenario: String? = null
+        private set
+
+    /** 场景序号（onNewIntent 递增，驱动 Compose 重复触发同名场景）。 */
+    @Volatile
+    var autoScenarioSequence: Int = 0
+        private set
 }
 
 /** 底部三页：任务 / 自检 / 设置（P3 计划决策 10：枚举页面切换承载导航语义）。 */
@@ -165,6 +197,9 @@ fun MiracleApp(
     sessionViewModel: SessionViewModel = viewModel(),
     loopSelfTestViewModel: LoopSelfTestViewModel = viewModel(),
     settingsViewModel: SettingsViewModel = viewModel(),
+    autoScenario: String? = null,
+    autoScenarioSequence: Int = 0,
+    onAutoScenarioConsumed: () -> Unit = {},
     onRequestProjection: () -> Unit = {},
 ) {
     var tab by remember { mutableStateOf(MiracleTab.TASKS) }
@@ -173,6 +208,19 @@ fun MiracleApp(
     LaunchedEffect(Unit) {
         smokeViewModel.runSelfTest()
         sessionViewModel.refreshGate(context)
+    }
+
+    // 真机取证：场景经 am start extra 注入，切到自检页并触发（靶点坐标绑定后）。
+    LaunchedEffect(autoScenario, autoScenarioSequence) {
+        if (autoScenario != null) {
+            tab = MiracleTab.SELF_TEST
+            kotlinx.coroutines.delay(600) // 等待页面布局与靶点坐标绑定
+            when (autoScenario) {
+                "connectivity" -> loopSelfTestViewModel.runConnectivity(context)
+                else -> loopSelfTestViewModel.runDryRun(context, autoScenario)
+            }
+            onAutoScenarioConsumed()
+        }
     }
 
     Box(modifier = modifier.fillMaxSize()) {

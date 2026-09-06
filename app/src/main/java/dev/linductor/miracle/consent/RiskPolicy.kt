@@ -80,7 +80,7 @@ object RiskPolicy {
                 if (kind < KIND_TAP || kind > KIND_RELEASE_ALL) {
                     return null
                 }
-                val text = event.optString("t", null)
+                val text = if (event.has("t")) event.optString("t") else null
                 actions.add(InputAction(kind, text))
             }
             actions

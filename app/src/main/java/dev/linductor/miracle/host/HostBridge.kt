@@ -221,8 +221,12 @@ object HostBridge {
 
     /** native 上投：闭环事件（相位/终态/确认请求与结算/会话状态）。 */
     @JvmStatic
-    fun onLoopEvent(wrappedJson: String) =
+    fun onLoopEvent(wrappedJson: String) {
+        // 真机取证证据流（P2 实践：Compose 语义树对 uiautomator 陈旧，以 logcat JSON
+        // 为准）；payload 均为 safe 级内容（无凭据/无 type 文本）。
+        android.util.Log.i("miracle/loop", wrappedJson)
         dev.linductor.miracle.runtime.AgentRuntime.handleNativeEvent(wrappedJson)
+    }
 
     /** native 调用：R3 准入询问（0=放行 1=需确认 2=拒绝）。 */
     @JvmStatic
