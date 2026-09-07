@@ -22,7 +22,9 @@ data class ModelConfig(
     val complete: Boolean
         get() = httpsValid && model.isNotBlank() && hasApiKey
 
-    /** native loopOpen/modelConnectivityTest 的配置 JSON（apiKey 为内存凭据）。 */
+    /** native loopOpen/modelConnectivityTest 的配置 JSON（apiKey 为内存凭据）。
+     * 不携带总超时（timeout_ms）：显式 0 会被 native 当有效值把会话 deadline
+     * 设成立即过期；缺省时 native 按步数×调用期限推默认总预算。 */
     fun toNativeJson(apiKey: String, transport: String = "kotlin"): String {
         val root = org.json.JSONObject()
         root.put("endpoint", endpoint)
@@ -32,7 +34,6 @@ data class ModelConfig(
         root.put("api_key", apiKey)
         root.put("max_steps", maxSteps)
         root.put("call_timeout_ms", callTimeoutMs)
-        root.put("timeout_ms", 0)
         root.put("transport", transport)
         return root.toString()
     }

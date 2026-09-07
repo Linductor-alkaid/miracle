@@ -39,6 +39,9 @@ class ModelConfigTest {
         assertEquals(24, root.getInt("max_steps"))
         assertEquals(45_000, root.getInt("call_timeout_ms"))
         assertEquals("kotlin", root.getString("transport"))
+        // 总超时不显式传递：0 会被 native 当有效值把会话 deadline 设成立即过期
+        // （observe 即被拒）；缺省由 native 按步数×调用期限推默认预算。
+        assertFalse(root.has("timeout_ms"))
     }
 
     @Test

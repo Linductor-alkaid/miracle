@@ -1155,10 +1155,14 @@ std::int32_t open(const std::string &config_json) {
     runtime->spec.task_epoch = 1;
     runtime->spec.profile_id = runtime->profile->id;
     runtime->runtime_id = mira::RuntimeId::generate();
-    runtime->total_timeout_ms = static_cast<std::uint64_t>(
-        parse_int_field(config, "timeout_ms",
-                        static_cast<std::int64_t>((runtime->loop_config.max_steps + 2)) *
-                            (runtime->loop_config.model_call_deadline.count() + 15'000)));
+    // 总超时：显式配置需为正。缺省/非正值回退按步数×调用期限推得的预算——
+    // 0 不是合法总超时（会把会话 deadline 设成立即过期，observe 即被拒）。
+    const std::int64_t configured_timeout_ms = parse_int_field(config, "timeout_ms", 0);
+    runtime->total_timeout_ms = configured_timeout_ms > 0
+        ? static_cast<std::uint64_t>(configured_timeout_ms)
+        : static_cast<std::uint64_t>(runtime->loop_config.max_steps + 2) *
+              static_cast<std::uint64_t>(
+                  runtime->loop_config.model_call_deadline.count() + 15'000);
     runtime->state = LoopState::Open;
 
     {
