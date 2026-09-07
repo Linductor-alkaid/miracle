@@ -22,7 +22,8 @@
 //    Kotlin；终态经 AgentLoopResult JSON。
 //  - 本文件不创建任何线程；阻塞等待仅在 mira Executor worker 上（gateway.infer 同步链）。
 //  - 锁序约定：g_loop_mutex → g_confirmations.mutex（begin/resolve 先取 epoch 再入
-//    确认锁，任何路径不得反向嵌套）。
+//    确认锁，任何路径不得反向嵌套）；g_transport_registry_mutex 为独立叶子锁——
+//    锁内只提升 weak_ptr，不调用传输实例方法，也不与上述两锁嵌套。
 #include "host_abi_impl.hpp"
 #include "host_jni.hpp"
 #include "loop_runtime.hpp"
@@ -52,6 +53,7 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -275,9 +277,18 @@ constexpr std::size_t kMaxInFlightExchanges = 8;
 constexpr int kExchangePollMs = 50;
 constexpr int kExchangeCancelGraceMs = 3'000;
 
+// 进程级唯一 exchange id（前置：execute 内联使用）。全局唯一是回流路由的
+// 正确性前提——否则会话栈与 connectivity 自检的局部实例各自从 1 起号，
+// 同一 id 会错误投递到另一实例的在途交换。
+std::atomic<std::uint64_t> g_next_exchange_id{1};
+
 class KotlinHttpTransport final : public mira::IHttpTransport {
   public:
-    ~KotlinHttpTransport() override { shutdown(); }
+    // 构造一律经 create()：实例登记进进程级注册表，完成回流按 exchange id 路由
+    // 到所属实例（会话栈与 connectivity 自检的局部实例均经同一条回流路径）。
+    static std::shared_ptr<KotlinHttpTransport> create();
+
+    ~KotlinHttpTransport() override;
 
     mira::Result<mira::HttpResponseInfo>
     execute(const mira::HttpRequest &request, const mira::TransportLimits &limits,
@@ -319,7 +330,8 @@ class KotlinHttpTransport final : public mira::IHttpTransport {
                       static_cast<unsigned long long>(limits.max_response_bytes));
 
         auto exchange = std::make_shared<HttpExchange>();
-        const std::uint64_t exchange_id = next_id_++;
+        const std::uint64_t exchange_id =
+            g_next_exchange_id.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard lock(registry_mutex_);
             if (registry_.size() >= kMaxInFlightExchanges) {
@@ -523,8 +535,29 @@ class KotlinHttpTransport final : public mira::IHttpTransport {
 
     std::mutex registry_mutex_;
     std::unordered_map<std::uint64_t, std::shared_ptr<HttpExchange>> registry_;
-    std::uint64_t next_id_ = 1;
 };
+
+// 进程级传输注册表（weak_ptr）：complete_http_exchange 在锁内提升为强引用后
+// 锁外调用，调用期间实例不会析构；已 shutdown/析构的实例 miss 回流（幂等 no-op）。
+std::mutex g_transport_registry_mutex;
+std::vector<std::weak_ptr<KotlinHttpTransport>> g_transport_registry;
+
+std::shared_ptr<KotlinHttpTransport> KotlinHttpTransport::create() {
+    auto transport = std::make_shared<KotlinHttpTransport>();
+    {
+        std::lock_guard lock(g_transport_registry_mutex);
+        g_transport_registry.emplace_back(transport);
+    }
+    return transport;
+}
+
+KotlinHttpTransport::~KotlinHttpTransport() {
+    shutdown();
+    std::lock_guard lock(g_transport_registry_mutex);
+    std::erase_if(g_transport_registry, [](const std::weak_ptr<KotlinHttpTransport> &weak) {
+        return weak.expired();
+    });
+}
 
 // ---- 脚本化传输（干跑探针；ChatCompletions wire JSON，决策来自脚本） ----
 
@@ -813,11 +846,22 @@ void emit_phase_signal(const char *phase) {
 
 void complete_http_exchange(std::uint64_t exchange_id, std::int32_t status,
                             const std::string &headers_json, const std::string &body) {
-    std::lock_guard lock(g_loop_mutex);
-    if (g_loop == nullptr || g_loop->kotlin_transport == nullptr) {
-        return;
+    // 按 id 路由到所属传输实例：会话栈（g_loop）与 connectivity 自检的局部实例
+    // 都在注册表内。锁内只提升强引用，锁外调用（complete 不触碰 g_loop 锁，
+    // 避免与注册表锁形成嵌套序）；id 全局唯一保证恰好一个 registry 命中，
+    // 其余实例按未知 id 丢弃（迟到/孤儿完成的既有语义不变）。
+    std::vector<std::shared_ptr<KotlinHttpTransport>> live;
+    {
+        std::lock_guard lock(g_transport_registry_mutex);
+        for (const auto &weak : g_transport_registry) {
+            if (auto transport = weak.lock()) {
+                live.push_back(std::move(transport));
+            }
+        }
     }
-    g_loop->kotlin_transport->complete(exchange_id, status, headers_json, body);
+    for (const auto &transport : live) {
+        transport->complete(exchange_id, status, headers_json, body);
+    }
 }
 
 // —— R3 确认 ——
@@ -1086,7 +1130,7 @@ std::int32_t open(const std::string &config_json) {
             (void)runtime->executor.shutdown(true);
             return -3;
         }
-        runtime->kotlin_transport = std::make_shared<KotlinHttpTransport>();
+        runtime->kotlin_transport = KotlinHttpTransport::create();
         transport = runtime->kotlin_transport;
         runtime->profile = build_profile(endpoint, api_prefix, model, dialect == "chat");
     }
@@ -1323,7 +1367,7 @@ std::string connectivity(const std::string &config_json) {
     if (!executor.initialize(executor_config)) {
         return "{\"ok\":false,\"stage\":\"executor\",\"error\":\"initialize failed\"}";
     }
-    auto transport = std::make_shared<KotlinHttpTransport>();
+    auto transport = KotlinHttpTransport::create();
     auto profile = build_profile(endpoint, api_prefix, model, dialect == "chat");
     // 连通性自检文本-only（无 ImagePart）：fail-closed 工件源，触达即如实报错。
     auto artifacts = std::static_pointer_cast<mira::IArtifactSource>(
