@@ -36,33 +36,33 @@
 
 ### 切片一：无障碍树进 mira（纯宿主，无上游依赖）
 
-- `P3x-01` 树快照与序列化：`MiracleAccessibilityService` 内快照策略（D-5 待决策，
+- [ ] `P3x-01` 树快照与序列化：`MiracleAccessibilityService` 内快照策略（D-5 待决策，
   倾向先按需 dump）；节点过滤（§6：visibleToUser/可交互/有文本，上限 64）；
   `mira.host.tree.v1` JSON 产出（时间戳 + 规范 bounds）。
-- `P3x-02` ABI 通道接线：`host_abi_impl` 的 `GET_UI_TREE` 实现从预留/空实现切换为
+- [ ] `P3x-02` ABI 通道接线：`host_abi_impl` 的 `GET_UI_TREE` 实现从预留/空实现切换为
   读快照（回调内只做拷贝，遵守 ABI 纪律）；`accessibility_completeness` 声明切换。
-- `P3x-03` 验证：mira `observe()` structure 组件出现在决策 prompt（传输日志/
+- [ ] `P3x-03` 验证：mira `observe()` structure 组件出现在决策 prompt（传输日志/
   preview 佐证）；干跑矩阵回归（树存在时结构摘要不破坏既有决策路径）。
-- 单测：序列化契约（节点上限/截断标注/时间戳）；快照线程模型。
+- [ ] 单测：序列化契约（节点上限/截断标注/时间戳）；快照线程模型。
 
 ### 切片二：SoM 叠标 + 编号表（纯宿主，量化增益）
 
-- `P3x-04` 标记分配与叠标：采集路径内树/帧对齐（150ms 阈值，超差降级文本表）；
+- [ ] `P3x-04` 标记分配与叠标：采集路径内树/帧对齐（150ms 阈值，超差降级文本表）；
   mark id 分配；编码前 Bitmap 角标绘制（只标可交互叶子，字号真机标定）。
-- `P3x-05` 编号表进 prompt：structure 摘要含 mark（上游摘要预算未放宽前，宿主侧
+- [ ] `P3x-05` 编号表进 prompt：structure 摘要含 mark（上游摘要预算未放宽前，宿主侧
   先过滤到可交互节点控制长度）。
-- `P3x-06` A/B 取证：同任务集（含 P3 亮度滑条场景）跑坐标-only vs 标记增强，
+- [ ] `P3x-06` A/B 取证：同任务集（含 P3 亮度滑条场景）跑坐标-only vs 标记增强，
   指标＝落点误差（像素）、参数缺失率、完成率；证据入本文档与台账。
-- 单测：对齐阈值/降级路径；叠标不影响 `HostFrameStore` 发布语义（digest 变化
+- [ ] 单测：对齐阈值/降级路径；叠标不影响 `HostFrameStore` 发布语义（digest 变化
   已由内容寻址自然处理）。
 
 ### 切片三：`target_mark` 协议落地（上游依赖）
 
-- `P3x-07` 上游反馈：MIR-20260907-001 issue 化（四处接口变更 + 宿主权威编号的
+- [ ] `P3x-07` 上游反馈：MIR-20260907-001 issue 化（四处接口变更 + 宿主权威编号的
   时序论证，见设计 §4）。
-- `P3x-08` lock 升级与适配：决策 schema `target_mark`、compile 校验/换算、
+- [ ] `P3x-08` lock 升级与适配：决策 schema `target_mark`、compile 校验/换算、
   摘要呈现；miracle 侧决策侧无改动（协议在 mira）。
-- `P3x-09` 验证：编号幻觉 fail-closed（构造不存在的 mark，断言 violation →
+- [ ] `P3x-09` 验证：编号幻觉 fail-closed（构造不存在的 mark，断言 violation →
   rejection 反馈重试）；真机任务走 mark 路径落点误差＝树 bounds 精度。
 
 ## 退出条件
