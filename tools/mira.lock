@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "mira",
   "version": "0.1.0",
-  "commit": "cbed6ad3c9ac5ce9bbb654b38909d5d090d96e4f",
+  "commit": "874f4a51117fe87ba73f7706b1ef912a7c3ab269",
   "remote_url": "https://github.com/Linductor-alkaid/mira.git",
   "local_path": "/home/linductor/mira",
   "source_workdir": "third_party/mira-src",
