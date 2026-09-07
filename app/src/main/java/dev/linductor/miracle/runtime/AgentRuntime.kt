@@ -156,6 +156,14 @@ object AgentRuntime {
         lastStepCount = 0
         _timeline.value = emptyList()
         appendTimeline("会话开启：$goal")
+        if (script == null) {
+            // 干净起点：真实任务自桌面开始。宿主任务页含"停止/接管"控件，留在
+            // 前台会被 Agent 当作可操作对象误触（tap 命中即取消会话）；刚输入
+            // 目标的键盘也会污染首帧观察。R3 确认在主 GUI 模式下随 60s 超时
+            // 拒绝（fail-closed 不变），通知渠道承接为后续项。
+            returnToHome(context)
+            delayForHomeTransition()
+        }
         val submitted = HostBridge.loopSubmit(goal, config.maxSteps)
         if (submitted != 1) {
             closeSession(recordResult = false)
@@ -163,6 +171,26 @@ object AgentRuntime {
         }
         _state.value = SessionState.Running(goal, LoopEventParser.Phase.Observing, 0, false)
         return null
+    }
+
+    private fun returnToHome(context: android.content.Context) {
+        try {
+            val home = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                addCategory(android.content.Intent.CATEGORY_HOME)
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(home)
+        } catch (error: Exception) {
+            android.util.Log.w(TAG, "home 引导失败：${error.message}")
+        }
+    }
+
+    private fun delayForHomeTransition() {
+        try {
+            Thread.sleep(HOME_TRANSITION_DELAY_MS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     fun cancelSession() {
@@ -283,4 +311,7 @@ object AgentRuntime {
     }
 
     private const val MAX_TIMELINE = 200
+
+    /** 回桌面过渡（动画/首帧稳定）等待；观察 max age 2s 内。 */
+    private const val HOME_TRANSITION_DELAY_MS = 600L
 }

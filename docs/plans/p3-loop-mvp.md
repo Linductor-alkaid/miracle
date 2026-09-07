@@ -279,3 +279,125 @@ UI 树观察（MIR-001 不变）；L3 扩展工具（POST-01）；事件持久�
 - 验证：`./gradlew assembleDebug lintDebug testDebugUnitTest` 全绿（单测 62/62）；
   native 目标针对新安装前缀重编译零警告；零线程创建/无 GlobalScope grep 通过。
   真机项（干跑矩阵、连通性、真实任务 ≥3 类）仍待设备连接补跑，不标记完成。
+
+2026-09-06（连通性自检修复：Kotlin 传输完成回流误路由，真机验证通过）：
+
+- 问题与定位：真机连通性自检恒定失败 `{"ok":false,"stage":"infer","error":"exchange
+  timed out","ms":33055}`（30s 期限 + 3s 取消宽限）；而 mira 上游 `m3_interop_probe`
+  （官方 mbedtls socket transport，同步返回）对同一服务通过。网络探测排除：手机与
+  开发机 `curl` 该端点均 <0.3s 返回 401（`https://api.siliconflow.cn/v1/chat/completions`）。
+- 根因：`complete_http_exchange` 只把 Kotlin 完成回流路由到 `g_loop->kotlin_transport`
+  （会话栈）；连通性自检使用局部 `KotlinHttpTransport` 实例（不挂 `g_loop`），HTTP
+  响应回到 Kotlin 后在 native 入口即被丢弃，native 侧等满期限按超时结算。干跑
+  （ScriptedTransport，同步）与真实会话（g_loop 路由正确）不受影响——与"仅连通性
+  自检一直失败"的现象一致。
+- 修复（`loop_runtime.cpp`，bridge 内部，不改 ABI/门面/JNI 签名）：exchange id 改
+  进程级唯一原子递增（消除会话栈与自检局部实例各自从 1 起号的同 id 误投递）；
+  `KotlinHttpTransport` 构造统一经 `create()` 登记进 weak_ptr 注册表（析构清理过期
+  项）；`complete_http_exchange` 在注册表内按 id 路由到所属实例——锁内提升强引用、
+  锁外调用（`g_transport_registry_mutex` 为独立叶子锁，文件头锁序注释同步）；
+  未命中实例按未知 id 丢弃（迟到/孤儿完成的既有 exactly-once 语义不变）。
+- 验证：`assembleDebug`、`testDebugUnitTest` 全绿（62/62）；真机 PJE110（`a4dfdcbf`）
+  重装修复包后触发连通性自检（配置：api.siliconflow.cn，Qwen/Qwen3.5-4B，chat 方言）：
+  `{"ok":true,"stage":"infer","admitted":true,"attempts":1,"decision":true,"violations":0,
+  "usage_in":45,"usage_out":222,"ms":6186,"mira_version":"0.1.0"}`（修复前同配置
+  33055ms 超时）。标准化取证脚本 `p3-device-verify.sh connectivity` 因投影绑定前置
+  （setup 需人工完成 ColorOS 授权）本次未执行，以 logcat 证据行为准；干跑矩阵与
+  真实任务真机项维持"待补跑"状态不变。
+
+2026-09-06（真实任务首次真机运行排查：`timeout_ms` 传递缺陷修复 + MIR-008 登记）：
+
+- 现象与定位一（会话 16ms 即 Failed）：真机任务"打开设置并调亮亮度"报
+  `observation failed: host operation was cancelled`（`cancelled_ops:1`，帧迟到按
+  status 7＝INVALID_STATE 结算）。根因：`ModelConfig.toNativeJson` 写死
+  `"timeout_ms":0`，native `open()` 按有效值取用 → `total_timeout_ms=0` → 会话
+  deadline 立即过期 → observe 经 ABI fail-closed 拒绝。干跑脚本不含该字段（走
+  native 公式默认），故未暴露。
+- 修复（Kotlin+native+单测）：`toNativeJson` 移除 `timeout_ms` 字段（KDoc 注明
+  缘由）；native 对显式 `timeout_ms<=0` 回退公式预算（fail-safe）；
+  `ModelConfigTest` 断言字段不存在防回归。`assembleDebug`/`testDebugUnitTest`
+  （63/63）/`lintDebug` 全绿。
+- 现象与定位二（推进至 model call 后失败）：真机重跑（用户重新授权投影）报
+  `model call failed: artifact descriptor integrity mismatch`。根因在上游 mira：
+  `agent_loop.cpp` `build_request()` 构造截图 `ArtifactRef` 漏填
+  `digest`（`ScreenFrameDescriptor.payload_digest` 已由 adapter 填充但未流入），
+  miracle `StoreArtifactSource` 按 DEC-013 语义以 ref 重建 descriptor 后
+  `MemoryArtifactStore::open` 完整性校验 fail-closed。上游测试
+  （`SimulatorArtifactSource` 仅按 id 打开）不可见该漏填。
+- 处置：按消费边界不在本仓库绕过；登记 `MIR-20260906-008`（P1）并反馈上游
+  mira [#19](https://github.com/Linductor-alkaid/mira/issues/19)（含根因、测试
+  盲区、期望语义与可验收结果）。上游修复合入后走 lock 升级独立变更重跑
+  "≥3 类真实任务"取证；该项维持待补跑状态。
+
+2026-09-06（mira lock 升级 `cbed6ad` → `635e136`：MIR-008 关闭；真实任务推进至
+决策编译层，MIR-009 登记）：
+
+- lock 升级与验证：上游 PR [#20](https://github.com/Linductor-alkaid/mira/pull/20)
+  （`a839565`）修复 ArtifactRef digest；`tools/mira.lock` 更新、
+  `install-mira.sh --force` 重建、`assembleDebug`/`testDebugUnitTest`/`lintDebug`
+  全绿。真机（PJE110）真实任务：observe → 模型调用（截图 wire `data:image/png` +
+  http 200 + 决策返回）全通，MIR-20260906-008 关闭（台账已注记）。
+- 宿主防御（真机暴露后落地）：任务提交前回桌面引导（`AgentRuntime.startSession`：
+  真实任务 HOME intent + 600ms 过渡等待）——此前模型首次 tap 落在宿主任务页
+  "停止"控件上（act 后 95ms 即"已请求取消"），且目标输入的 IME 污染首帧观察；
+  干跑（scripted）不受影响。R3 确认弹窗随 Activity 后台不可见，超时即拒绝
+  （fail-closed 不变），通知渠道承接登记为后续项。
+- 决策可诊断性：`HttpTransportBinding` 增加响应摘要日志（`miracle/transport`：
+  http 状态 + 字节数 + 头 256B，不含凭据）——决策失败此前完全不可归因。
+- 新阻断（MIR-20260906-009，上游 [#21](https://github.com/Linductor-alkaid/mira/issues/21)）：
+  决策 schema `required` 仅 `action+reason`，模型返回
+  `{"action":"swipe","reason":…}`（无坐标）过 schema 后在
+  `compile_discrete_action` 失败，AgentLoop 一步终态 Failed（无 repair）。
+  miracle 侧不可修补（冻结契约）；上游修复后重跑"≥3 类真实任务"取证。
+  另一观察项：Qwen3.5-4B 推理型输出单次决策耗时 ~29.7s（接近 30s 默认
+  call_timeout，设置页可调 5-120s）。
+
+2026-09-06（mira lock 升级 `635e136` → `d1993d2`：MIR-009 上游修复落地；真机取证欠账）：
+
+- 上游修复：PR [#22](https://github.com/Linductor-alkaid/mira/pull/22)（`9a1dd28`）
+  ——决策 compile 失败在 `max_recoveries_per_step` 预算内以静态诊断作为 feedback
+  重试，预算耗尽才带具体原因终态 Failed（上游含 m3 测试与文档）。
+- Miracle 落地：lock 更新至 `d1993d2`；`install-mira` 重建（子模块经本地路径
+  解析：`protocol.file.allow always` + 指向 `/home/linductor/mira/third_party/*`，
+  绕开当次 GitHub 网络中断；恢复远程时无需回退——URL 仅影响取源方式）；
+  `assembleDebug`/`testDebugUnitTest`/`lintDebug` 全绿。
+- 真机取证欠账（不标记完成）：当前无可用真机。补跑条件＝设备连接 + 投影/
+  无障碍授权后重跑真实任务（Qwen3.5-4B），断言：参数缺失决策触发
+  `recoveries>0` 反馈重试（`miracle/loop` 步记录 note 含 compile 诊断）、
+  不再一步终态；随后 MIR-009 台账转 Resolved 并执行 P3 "≥3 类真实任务"
+  取证（建议先把 call_timeout 调至 ≥60s，实测单次决策 ~29.7s）。
+
+2026-09-06（`d1993d2` 真机验证：MIR-009 关闭；MIR-010 登记——验证观察零组件
+请求被 Android adapter 拒绝）：
+
+- 真机验证（PJE110，用户执行测试）：决策→动作链路全通——模型首次决策即带
+  规范坐标（`tap x:0.396`）、编译执行成功、设置应用被打开；MIR-009 正向链路
+  验证通过转 Resolved（负路径由上游 m3 测试覆盖）。回桌面引导下首帧观察干净
+  （observing→reasoning 385ms）。
+- 新阻断（act 后 87ms 终态 `Failed: "verification observation failed"`，无
+  取消/网络错误）：`observe_once(Verification)` 发出零组件请求（仅设 max_age），
+  `AndroidHostAdapter` 对零组件请求 fail-closed → 每步验证必败。测试盲区：
+  Simulator 宽容 + `ModelDoneVerifier` 不消费 Observation。登记
+  `MIR-20260906-010`（P1）并反馈上游 mira
+  [#23](https://github.com/Linductor-alkaid/mira/issues/23)。上游修复后 lock
+  升级重跑；"≥3 类真实任务"取证仍待此阻断解除。
+
+2026-09-06（`874f4a5` 真机验证：闭环 5 步直达 Completed——MIR-010 关闭；两项
+非阻断遗留定性）：
+
+- 真机验证（PJE110，用户执行）：MIR-010 修复生效——验证观察每步通过，真实任务
+  首次 5 步推进至 `Completed`（recoveries=1：step1 模型漏坐标经 MIR-009 反馈
+  重试修正；行为链：桌面 → 打开设置 → 显示与亮度 → 滑动滑块 → done 声明）。
+  MIR-010 台账转 Resolved。
+- 配套修复（miracle UI 缺口）：设置页新增"单次决策超时 ms"字段
+  （5000-120000）——数据层本已支持但无入口，默认 30s 在 Qwen3.5-4B 推理型
+  输出下不稳定（实测 6-30s 波动，第三步曾 30.05s 超时终态）。本轮已存 120s。
+- 遗留一（诚实呈现，本轮落地）：终态 `Completed` 实为模型 done 声明确认——
+  `ModelDoneVerifier` 为 mira 测试实现（头文件自述"used by tests"，verify 忽略
+  Observation），miracle 误作生产 verifier；真机已出现"声称完成但滑动落点
+  错误、目标未达成"。任务页终态文案改为"模型声称完成（未独立验证目标）+
+  建议自行核对"。真实目标验证（自定义 ILoopVerifier：UI 树/视觉对照）登记
+  为后续项。
+- 遗留二（模型 grounding，后续项）：滑动滑块落点错误＝Qwen3.5-4B 视觉定位
+  弱；路径＝更强模型或 UI 树 grounding（Kotlin 无障碍树 →
+  `mira.host.tree.v1`，MIR-20260905-001 关闭注记已预告，待独立计划项）。

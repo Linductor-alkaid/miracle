@@ -137,8 +137,11 @@ fun SessionTab(
             )
 
             is AgentRuntime.SessionState.Terminal -> SessionCard(
-                title = if (state.ok) "任务完成" else "任务结束（${state.outcome}）",
-                detail = "目标：${state.goal}\n${state.summary}",
+                // 诚实呈现：当前 verifier 只确认模型 done 声明（ModelDoneVerifier
+                // 为测试实现），未独立对照目标——真机已出现"声称完成但动作落点
+                // 错误"。真实目标验证（UI 树/视觉对照）为后续项。
+                title = if (state.ok) "模型声称完成（未独立验证目标）" else "任务结束（${state.outcome}）",
+                detail = "目标：${state.goal}\n${state.summary}\n建议自行核对结果。",
                 ok = state.ok,
             )
 
@@ -293,6 +296,18 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("步数上限（1-128）") },
+                )
+                OutlinedTextField(
+                    value = config.callTimeoutMs.toString(),
+                    onValueChange = { value ->
+                        val timeout = value.toIntOrNull() ?: config.callTimeoutMs
+                        viewModel.update {
+                            it.copy(callTimeoutMs = timeout.coerceIn(5_000, 120_000))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("单次决策超时 ms（5000-120000；推理型模型建议 ≥90000）") },
                 )
                 state.error?.let { error ->
                     Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

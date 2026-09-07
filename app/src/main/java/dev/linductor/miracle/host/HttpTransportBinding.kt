@@ -236,10 +236,12 @@ class HttpTransportBinding {
             val status = opened.responseCode
             if (status in 200..299) {
                 val bytes = readBounded(opened.inputStream, request.maxResponseBytes)
+                logResponse(exchange.id, status, bytes)
                 emitBody(exchange.id, status, opened.headerFields, bytes)
             } else {
                 // 非 2xx：错误体读小量诊断（不进入结果，仅日志摘要计数）
-                readBounded(opened.errorStream ?: opened.inputStream, 4 * 1024)
+                val diagnostic = readBounded(opened.errorStream ?: opened.inputStream, 4 * 1024)
+                logResponse(exchange.id, status, diagnostic)
                 emitBody(exchange.id, status, opened.headerFields, ByteArray(0))
             }
             status
@@ -298,6 +300,15 @@ class HttpTransportBinding {
         pendingBodies[exchangeId] = PendingBody(status, headers.toString(), body)
     }
 
+    /** 响应诊断摘要（决策失败可诊断性；不含凭据，头部截断防日志膨胀）。 */
+    private fun logResponse(exchangeId: Long, status: Int, body: ByteArray) {
+        val head = body.copyOfRange(0, minOf(256, body.size)).toString(Charsets.UTF_8)
+        android.util.Log.i(
+            TAG,
+            "exchange $exchangeId: http $status, ${body.size}B, head=$head",
+        )
+    }
+
     private class PendingBody(val status: Int, val headersJson: String, val body: ByteArray)
 
     private val pendingBodies = ConcurrentHashMap<Long, PendingBody>()
@@ -316,6 +327,7 @@ class HttpTransportBinding {
     }
 
     companion object {
+        private const val TAG = "miracle/transport"
         const val STATUS_CANCELLED = -1
         const val STATUS_TIMEOUT = -2
         const val STATUS_NETWORK = -3
