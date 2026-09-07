@@ -253,3 +253,25 @@
   fresh-observation 验证路径可达；闭环可走多步直至 Completed。
 - 备注：MIR-009 关闭后同链路暴露（第三次：Simulator 宽容/Android 严格的
   契约分叉——DEC-011 验证载体价值持续体现）。
+
+### MIR-20260907-001：决策协议缺乏元素引用（target_mark）与树标记元数据
+
+- 状态：Design（P3x 视觉定位增强的上游依赖；设计与计划已立
+  [visual_grounding_design.md](../design/visual_grounding_design.md) /
+  [p3x-visual-grounding.md](../plans/p3x-visual-grounding.md)，待 P3x 切片一/二真机
+  数据支撑后 issue 化反馈）
+- 分级：P2（结构性：定位精度受限于 VLM 坐标回归，真实任务落点错误已取证）
+- 背景：miracle P3 真机（2026-09-06）——Qwen3.5-4B 对降采样全屏截图的坐标回归
+  不稳定（亮度滑条 swipe 落点偏移，目标未达成而终态 Completed）。
+- 期望语义（四处，详见设计 §4）：
+  1. `mira.host.tree.v1` 节点可选 `mark` 字段 + 快照时间戳（编号由宿主分配——
+     mark 权威必须与帧同路径，mira 无法反向驱动宿主编码时序）；
+  2. structure 摘要保留 mark id，长度预算可配置（现 2048 截断不足）；
+  3. 决策 schema 支持 `target_mark`（与坐标二选一）；compile 校验
+     mark ∈ 本帧 structure 标记集并换算 bounds 中心（防幻觉引用 fail-closed）；
+  4. 决策摘要/事件呈现 "tap mark N（描述）"。
+- 可验收结果：宿主上报带 mark 的树后，决策经 target_mark 落点达到树 bounds
+  精度；幻觉编号触发 violation 走既有 rejection 反馈；miracle 真机 A/B 报告
+  （标记路径 vs 坐标路径）归档。
+- 备注：SoM 实体（叠标/编号/对齐）归宿主（DEC-013 编码职责 + 采集路径时序 +
+  ABI 回调纪律三条依据，设计 §4 D-1）；mira 侧为纯接口/协议调整。

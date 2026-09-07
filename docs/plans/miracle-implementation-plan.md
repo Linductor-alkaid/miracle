@@ -62,6 +62,7 @@ IHttpTransport + R3 确认协议 + 双前端全功能交付；单测 48/48、全
 | P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | [p1-screen-capture.md](p1-screen-capture.md)（Completed） |
 | P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | [p2-input-dispatch.md](p2-input-dispatch.md)（Completed） |
 | P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | [p3-loop-mvp.md](p3-loop-mvp.md)（In Progress：代码完成，真机取证补跑） |
+| P3x | 闭环增强：视觉定位（无障碍树 + Set-of-Mark、target_mark 协议） | v0.3.1 | [p3x-visual-grounding.md](p3x-visual-grounding.md)（Proposed） |
 | P4 | 有状态：state_store 落盘、崩溃恢复、replay 检视 | v0.4.0 | `p4-stateful.md`（待建） |
 | P5 | 验证报告与上游回流 | v0.5.0（评估报告） | `p5-validation-report.md`（待建） |
 
