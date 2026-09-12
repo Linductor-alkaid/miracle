@@ -172,7 +172,11 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_AUTO_SCENARIO = "dev.linductor.miracle.extra.AUTO_SCENARIO"
         val AUTO_SCENARIOS =
-            listOf("complete", "max_steps", "cancel", "r3", "connectivity")
+            listOf(
+                "complete", "max_steps", "cancel", "r3", "connectivity",
+                // P3h：用户消息介入四路径 + wait 工具链路 + 预算耗尽。
+                "user_message", "tool", "tool_budget",
+            )
     }
 
     /** 待执行的取证场景（Compose State：onNewIntent 变更驱动重组消费）。 */

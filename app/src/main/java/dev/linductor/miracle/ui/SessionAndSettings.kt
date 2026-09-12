@@ -51,7 +51,10 @@ fun SessionTab(
     val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
     val timeline by viewModel.timeline.collectAsStateWithLifecycle()
     val startError by viewModel.startError.collectAsStateWithLifecycle()
+    val instructionError by viewModel.instructionError.collectAsStateWithLifecycle()
+    val conversation by viewModel.conversation.collectAsStateWithLifecycle()
     var goalInput by remember { mutableStateOf("") }
+    var instructionInput by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         val gateStatus = gate
@@ -123,18 +126,60 @@ fun SessionTab(
         }
 
         when (val state = sessionState) {
-            is AgentRuntime.SessionState.Running -> SessionCard(
-                title = "运行中 · ${
-                    when (state.phase) {
-                        LoopEventParser.Phase.Observing -> "观察"
-                        LoopEventParser.Phase.Reasoning -> "推理"
-                        LoopEventParser.Phase.Acting -> "动作"
-                        LoopEventParser.Phase.Unknown -> "进行中"
+            is AgentRuntime.SessionState.Running -> {
+                SessionCard(
+                    title = "运行中 · ${
+                        when (state.phase) {
+                            LoopEventParser.Phase.Observing -> "观察"
+                            LoopEventParser.Phase.Reasoning -> "推理"
+                            LoopEventParser.Phase.Acting -> "动作"
+                            LoopEventParser.Phase.Unknown -> "进行中"
+                        }
+                    }${if (state.takeover) " · 已接管" else ""}",
+                    detail = "目标：${state.goal}\n已派发动作 ${state.stepEvents} 次",
+                    ok = null,
+                )
+                if (!state.takeover) {
+                    // 运行中介入（DEC-016）：指令在步边界注入并常驻后续请求；
+                    // "已注入"不等于指令必然改变模型行为，高风险动作仍走 R3 确认。
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("运行中介入", style = MaterialTheme.typography.titleSmall)
+                            OutlinedTextField(
+                                value = instructionInput,
+                                onValueChange = { instructionInput = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("补充指令（下一步注入，持续整个任务）") },
+                            )
+                            instructionError?.let { error ->
+                                Text(
+                                    error,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = {
+                                        viewModel.sendInstruction(instructionInput)
+                                        instructionInput = ""
+                                    },
+                                    enabled = instructionInput.isNotBlank(),
+                                ) {
+                                    Text("注入指令")
+                                }
+                                TextButton(onClick = viewModel::clearInstructionError) {
+                                    Text("清除提示")
+                                }
+                            }
+                        }
                     }
-                }${if (state.takeover) " · 已接管" else ""}",
-                detail = "目标：${state.goal}\n已派发动作 ${state.stepEvents} 次",
-                ok = null,
-            )
+                }
+            }
 
             is AgentRuntime.SessionState.Terminal -> SessionCard(
                 // 诚实呈现：当前 verifier 只确认模型 done 声明（ModelDoneVerifier
@@ -146,6 +191,30 @@ fun SessionTab(
             )
 
             AgentRuntime.SessionState.Idle -> Unit
+        }
+
+        if (conversation.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("会话记录（事件存储投影 · 只读）", style = MaterialTheme.typography.titleSmall)
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp),
+                    ) {
+                        items(conversation.asReversed()) { entry ->
+                            Text(
+                                "${if (entry.kind == "user_message") "🗣" else "·"} ${entry.text}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         if (timeline.isNotEmpty()) {

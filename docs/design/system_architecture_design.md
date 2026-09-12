@@ -52,19 +52,22 @@
 | --- | --- | --- | --- |
 | `app.ui` | Kotlin | 主 GUI：引导、任务台、会话详情、设置 | Compose 组件树，仅消费 `AgentRuntime` 状态 |
 | `app.overlay` | Kotlin | 悬浮球与展开面板、活动指示 | `OverlayController`（show/hide/状态更新） |
-| `runtime.AgentRuntime` | Kotlin | 门面：会话启动/停止/takeover、状态流、事件流、确认请求流 | `suspend fun startSession(goal)`、`StateFlow<SessionState>`、`SharedFlow<SessionEvent>`、`SharedFlow<ConfirmationRequest>` |
+| `runtime.AgentRuntime` | Kotlin | 门面：会话启动/停止/takeover、状态流、事件流、确认请求流、运行中指令注入（P3h，DEC-016） | `suspend fun startSession(goal)`、`StateFlow<SessionState>`、`SharedFlow<SessionEvent>`、`SharedFlow<ConfirmationRequest>`、`fun sendUserInstruction(text): String?`（入队前 `UserMessagePolicy` 脱敏）、`fun conversation(): List<ConversationEntry>`（只读投影） |
 | `consent.SessionGate` | Kotlin | 同意门面：披露确认、能力授权状态、会话准入、活动指示控制 | `fun canStartSession(): GateStatus` |
 | `host.ScreenCaptureProvider` | Kotlin | MediaProjection 授权、VirtualDisplay+ImageReader、帧租约（RGBA） | `fun requestFrame(deadline): FrameLease` |
 | `host.InputDispatcher` | Kotlin | 手势合成与 dispatchGesture、焦点文本注入、取消（原子语义：未提交 CANCELLED／已提交 EXECUTION_UNCERTAIN+side=1）与 RELEASE_ALL | `fun dispatch(events, deadline): Receipt` |
 | `host.CapabilityRegistry` | Kotlin | 能力快照、epoch 维护（旋转/权限/会话变化递增）、权限自检 | `fun snapshot(): HostCapabilities` |
 | `bridge.host_abi_impl` | C++ | 实现 `mira_android_host_*` 全部符号；操作注册表（correlation→pending）；lease 生命周期 | （被 mira adapter 调用，无上层接口） |
-| `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、自检入口封送、JNI 注册 | JNI 导出（P3 实际面）：`loopOpen/loopSubmit/loopCancel/loopTakeover/loopClose/loopState`、`modelConnectivityTest`、`consentResolve`、`nativeHttpExchangeComplete` 等 |
-| `bridge.loop_runtime` | C++ | P3 新增：AgentLoop 组装（gateway/provider/admission/事件存储/verifier）、宿主 `IHttpTransport`（Kotlin HTTPS 执行 + C++ 协作等待）、脚本化干跑传输、R3 确认协议（`ConfirmationAuthority`） | 被 runtime_glue 调用；host_abi_impl 经其查询会话活跃/签发挑战 |
+| `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、自检入口封送、JNI 注册 | JNI 导出（P3 实际面）：`loopOpen/loopSubmit/loopCancel/loopTakeover/loopClose/loopState`、`loopSendUserMessage/loopConversation`（P3h）、`modelConnectivityTest`、`consentResolve`、`nativeHttpExchangeComplete` 等 |
+| `bridge.loop_runtime` | C++ | P3 新增：AgentLoop 组装（gateway/provider/admission/事件存储/verifier）、宿主 `IHttpTransport`（Kotlin HTTPS 执行 + C++ 协作等待）、脚本化干跑传输、R3 确认协议（`ConfirmationAuthority`）；P3h：`BuiltinToolRegistry`（Core `wait`）、受控 `AgentLoop` 实例持有（用户消息邮箱 DEC-016）、`build_conversation_view` 投影 | 被 runtime_glue 调用；host_abi_impl 经其查询会话活跃/签发挑战 |
 | `mira`（上游） | C++ | Agent Harness 控制平面（闭环、模型网关、任务/会话状态机、持久状态）+ Workflow 数据平面（IR/编译/运行/导航/学习/恢复，M8–M14） | `find_package(Mira)` 公共 API |
 
-**消费现状注记（2026-09-12，lock `874f4a5`）**：P3 组装的是 AgentLoop 直驱子集
-（`MiraRuntime` 任务控制面未消费）；Workflow 平面模块已随安装包编译交付（Android 双
-ABI CI 门禁），miracle 侧零消费、零设备证据。消费顺序与范围见 §10 与
+**消费现状注记（2026-09-12，lock `5b55e14`，P3h 对齐后）**：P3 组装的是 AgentLoop
+直驱子集（`MiraRuntime` 任务控制面未消费，P4 起迁移）；P3h 经公共 API 采纳 DEC-015
+（`BuiltinToolRegistry` + Core `wait`）与 DEC-016（`enqueue_user_message` 用户消息
+邮箱 + `build_conversation_view` 会话投影）；Workflow 平面模块已随安装包编译交付
+（Android 双 ABI CI 门禁），miracle 侧零消费、零设备证据（P6 起消费）。消费顺序与
+范围见 §10 与
 [DEC-004](../decisions/DEC-004-mira-dual-plane-consumption.md)。
 
 ## 3. 一次任务闭环的数据流

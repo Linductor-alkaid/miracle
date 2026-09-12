@@ -33,6 +33,7 @@
 #include <mira/adapters/android/android_host_adapter.hpp>
 #include <mira/agent_loop.hpp>
 #include <mira/artifact_store.hpp>
+#include <mira/conversation_log.hpp>
 #include <mira/core_contracts.hpp>
 #include <mira/environment.hpp>
 #include <mira/event_store.hpp>
@@ -44,6 +45,7 @@
 #include <mira/model_schema.hpp>
 #include <mira/model_transport.hpp>
 #include <mira/security.hpp>
+#include <mira/tool_executor.hpp>
 #include <mira/version.hpp>
 
 #include <executor/executor.hpp>
@@ -348,6 +350,10 @@ class KotlinHttpTransport final : public mira::IHttpTransport {
                 mira::ErrorCode::Unavailable,
                 accepted == 1 ? "host transport unavailable" : "host transport rejected");
         }
+        // BUG-20260912-P3H-01 可诊断性：交换生命周期落日志（受理/取消通知/结算）。
+        __android_log_print(ANDROID_LOG_INFO, kLogTag, "exchange %llu started (%lldB body)",
+                            static_cast<unsigned long long>(exchange_id),
+                            static_cast<long long>(request.body.size()));
 
         // 有界协作等待：50ms 轮询完成/取消/超时；取消时通知 Kotlin disconnect()。
         trace.write_started = true;
@@ -368,7 +374,20 @@ class KotlinHttpTransport final : public mira::IHttpTransport {
                 const bool cancelled = context.cancelled();
                 if ((expired || cancelled) && !exchange->cancel_notified) {
                     exchange->cancel_notified = true;
+                    // BUG-20260912-P3H-01 根因修复：notify_cancel 的 Kotlin 链路
+                    // （cancel → emitComplete → nativeHttpExchangeComplete）会以
+                    // **同线程重入** complete()，后者再次尝试本 exchange->mutex——
+                    // std::mutex 不可重入，持锁发起该 JNI 调用即 worker 自死锁
+                    // （真机 2026-09-12 两次真实任务挂起：交换 write 无限阻塞 +
+                    // deadline 取消通知自死锁 → loop 永不结算）。必须锁外通知。
+                    __android_log_print(
+                        ANDROID_LOG_INFO, kLogTag,
+                        "exchange %llu cancel notify (expired=%s cancelled=%s)",
+                        static_cast<unsigned long long>(exchange_id),
+                        expired ? "true" : "false", cancelled ? "true" : "false");
+                    lock.unlock();
                     notify_cancel(exchange_id); // fire-and-forget，Kotlin 保证有界收尾回流
+                    lock.lock();
                 }
                 if (expired) {
                     break; // 取消宽限后仍未回流：按超时结算（迟到完成将被丢弃）。
@@ -380,6 +399,12 @@ class KotlinHttpTransport final : public mira::IHttpTransport {
             body_back = exchange->body;
         }
         remove_exchange(exchange_id);
+        __android_log_print(
+            ANDROID_LOG_INFO, kLogTag,
+            "exchange %llu settled: done=%s status=%d elapsed=%lldms",
+            static_cast<unsigned long long>(exchange_id), done ? "true" : "false", status,
+            std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - started)
+                .count());
 
         if (!done) {
             return transport_error(mira::ErrorCode::DeadlineExceeded, "exchange timed out");
@@ -574,13 +599,34 @@ std::string chat_completions_body(const std::string &decision_json, std::uint64_
     return body;
 }
 
+// 工具轮 wire（DEC-015）：finish_reason=tool_calls + tool_calls 数组（arguments 为
+// JSON 字符串，方言层解析后自行计算摘要——与真实端点一致）。
+std::string chat_completions_tool_body(const std::string &call_id, const std::string &name,
+                                       const std::string &arguments_json, std::uint64_t index) {
+    char id[48];
+    std::snprintf(id, sizeof(id), "script_%llu", static_cast<unsigned long long>(index));
+    std::string body = "{\"id\":\"";
+    body += id;
+    body += "\",\"object\":\"chat.completion\",\"model\":\"scripted\",\"choices\":[{"
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"";
+    body += json_escape(call_id);
+    body += "\",\"type\":\"function\",\"function\":{\"name\":\"";
+    body += json_escape(name);
+    body += "\",\"arguments\":\"";
+    body += json_escape(arguments_json);
+    body += "\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":16,"
+            "\"completion_tokens\":8}}";
+    return body;
+}
+
 class ScriptedTransport final : public mira::IHttpTransport {
   public:
     explicit ScriptedTransport(std::vector<std::string> decision_scripts)
         : decisions_(std::move(decision_scripts)) {}
 
     mira::Result<mira::HttpResponseInfo>
-    execute(const mira::HttpRequest & /*request*/, const mira::TransportLimits & /*limits*/,
+    execute(const mira::HttpRequest &request, const mira::TransportLimits & /*limits*/,
             const mira::OperationContext &context, const mira::HttpChunkCallback &on_chunk,
             mira::TransportTrace &trace) override {
         emit_loop_event("phase", "{\"phase\":\"reasoning\"}");
@@ -594,6 +640,15 @@ class ScriptedTransport final : public mira::IHttpTransport {
         std::string decision;
         {
             std::lock_guard lock(mutex_);
+            // 请求标记记录（干跑断言投影：用户指令/工具结果是否进入后续请求）。
+            // 只在请求体中检索既定标记子串，不保存请求内容。
+            requests_ += 1;
+            if (request.body.find("User follow-up:") != std::string::npos) {
+                saw_followup_ = true;
+            }
+            if (request.body.find("Tool results from the previous turn:") != std::string::npos) {
+                saw_tool_result_ = true;
+            }
             if (index_ >= decisions_.size()) {
                 mira::Error error;
                 error.code = mira::ErrorCode::ResourceExhausted;
@@ -607,7 +662,32 @@ class ScriptedTransport final : public mira::IHttpTransport {
         trace.write_started = true;
         trace.write_completed = true;
         trace.headers_received = true;
-        const std::string body = chat_completions_body(decision, index_);
+        // 脚本条目二形：决策对象（message.content）或工具调用
+        // {"tool_call":{"name":..,"arguments":{..}}}（tool_calls wire）。
+        const auto parsed = mira::parse_json(decision);
+        const auto *tool_entry =
+            parsed.has_value() ? parsed.value().find("tool_call") : nullptr;
+        std::string body;
+        if (tool_entry != nullptr && tool_entry->is_object()) {
+            const auto *name = tool_entry->find("name");
+            const std::string *name_text = name == nullptr ? nullptr : name->as_string();
+            const auto *arguments = tool_entry->find("arguments");
+            if (name_text == nullptr || name_text->empty() || arguments == nullptr ||
+                !arguments->is_object()) {
+                mira::Error error;
+                error.code = mira::ErrorCode::InvalidArgument;
+                error.domain = "miracle.script";
+                error.safe_message = "tool_call script entry is malformed";
+                return error;
+            }
+            char call_id[32];
+            std::snprintf(call_id, sizeof(call_id), "script_call_%llu",
+                          static_cast<unsigned long long>(index_));
+            body = chat_completions_tool_body(call_id, *name_text,
+                                              mira::to_json_string(*arguments), index_);
+        } else {
+            body = chat_completions_body(decision, index_);
+        }
         if (on_chunk != nullptr) {
             on_chunk(body);
         }
@@ -619,10 +699,25 @@ class ScriptedTransport final : public mira::IHttpTransport {
         return info;
     }
 
+    // 干跑断言投影（结果 JSON 的 transport 字段；P3h-05 链路取证）。
+    std::string stats_json() const {
+        std::lock_guard lock(mutex_);
+        char buffer[192];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"requests\":%llu,\"saw_followup\":%s,\"saw_tool_result\":%s}",
+                      static_cast<unsigned long long>(requests_),
+                      saw_followup_ ? "true" : "false",
+                      saw_tool_result_ ? "true" : "false");
+        return buffer;
+    }
+
   private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::vector<std::string> decisions_;
     std::uint64_t index_ = 0;
+    std::uint64_t requests_ = 0;
+    bool saw_followup_ = false;
+    bool saw_tool_result_ = false;
 };
 
 // ---- R3 确认（DEC-004；mira ConfirmationAuthority 为协议权威） ----
@@ -645,6 +740,12 @@ struct ConfirmationRegistry final {
     std::mutex mutex;
     mira::ConfirmationAuthority authority;
     std::vector<std::shared_ptr<PendingR3>> pending;
+    // 确认主体身份：设备级单用户模型，进程内稳定（issue/consume 按挑战绑定
+    // 校验主体一致）。P3 起未设置 user_id，issue() 的非空校验静默失败 → R3
+    // 动作一律按 REJECTED 结算（fail-closed 安全但确认 UX 从未生效；真机
+    // 2026-09-12 r3 场景首次执行暴露）。
+    mira::TenantId tenant_id{mira::TenantId::generate()};
+    mira::UserId user_id{mira::UserId::generate()};
 };
 
 ConfirmationRegistry g_confirmations;
@@ -661,11 +762,14 @@ struct LoopRuntime final {
     std::shared_ptr<mira::SimpleAdmissionGate> admission;
     std::shared_ptr<mira::MemoryEventStore> events;
     std::shared_ptr<KotlinHttpTransport> kotlin_transport;
+    std::shared_ptr<ScriptedTransport> scripted; // 干跑断言投影（stats_json）
     mira::ModelDoneVerifier verifier;
     // 帧载荷 store：注入 adapter（必须先于 adapter 声明——注入 store 的生命周期
     // 覆盖 adapter，成员逆序析构保证 adapter 先销毁）。
     std::shared_ptr<HostFrameStore> frame_store;
     std::shared_ptr<mira::adapters::android::AndroidHostAdapter> adapter;
+    // DEC-015 工具注册表（P3h-05：wait 参考工具；run 闭包经 set_tool_registry 挂接）。
+    std::shared_ptr<mira::BuiltinToolRegistry> tools;
 
     mira::AgentLoopConfig loop_config;
     mira::AgentLoopSpec spec;
@@ -676,6 +780,9 @@ struct LoopRuntime final {
     std::string last_result_json;
     std::optional<executor::TaskHandle> cancel_handle;
     std::future<std::string> result_future;
+    // DEC-016 用户消息入队目标：仅 run 执行期间存活（受 g_loop_mutex 保护；
+    // 终态/异常清理与状态翻转同临界区，enqueue 的可见性与 Running 态判定原子）。
+    std::shared_ptr<mira::AgentLoop> live_loop;
 };
 
 std::mutex g_loop_mutex;
@@ -720,6 +827,32 @@ std::int64_t parse_int_field(const mira::JsonValue &root, const char *key,
     return value.has_value() ? *value : fallback;
 }
 
+// 按事件类型计数（loop 会话维度；结果 JSON 的取证投影，分页读全量）。
+std::uint64_t count_events(const mira::IEventStore &store, const mira::SessionId &session,
+                           const char *type) {
+    std::uint64_t count = 0;
+    std::optional<mira::SessionSequence> after;
+    while (true) {
+        mira::EventQuery query;
+        query.session_id = session;
+        query.after_sequence = after;
+        const auto page = store.read(query);
+        if (!page.has_value() || page.value().events.empty()) {
+            break;
+        }
+        for (const auto &envelope : page.value().events) {
+            if (envelope.payload.type == type) {
+                count += 1;
+            }
+        }
+        if (!page.value().has_more) {
+            break;
+        }
+        after = page.value().events.back().session_sequence;
+    }
+    return count;
+}
+
 // 按设置构建 profile（能力位诚实：Configured 级证据，见 P3 计划决策 7）。
 std::shared_ptr<mira::ModelProfile> build_profile(const std::string &endpoint,
                                                   const std::string &api_prefix,
@@ -740,6 +873,13 @@ std::shared_ptr<mira::ModelProfile> build_profile(const std::string &endpoint,
         mira::CapabilityFlag{true, configured, "user endpoint (host-encoded png wire)"};
     profile->capabilities.strict_json_schema =
         mira::CapabilityFlag{true, configured, "user endpoint"};
+    // DEC-015：AgentLoop 挂载 wait 工具后 request.tools 非空，路由查询要求
+    // function_tools 能力（真机回归 2026-09-12 暴露：缺失时模型调用被路由拒绝
+    // "capability not supported: function_tools"）。与 image_input 同级声明：
+    // Configured 级证据（OpenAI 兼容方言 tool_calls wire），端点实际支持以连通性
+    // 自检/真实任务为准；parallel_tool_calls 不声明（mira 逐轮单决策语义）。
+    profile->capabilities.function_tools =
+        mira::CapabilityFlag{true, configured, "user endpoint (openai-compatible tool_calls)"};
     profile->capabilities.sse = mira::CapabilityFlag{false, configured, "non-stream"};
     profile->default_data_policy.store = false;
     return profile;
@@ -762,7 +902,10 @@ const char *phase_name(mira::StepPhase phase) {
 }
 
 std::string loop_result_json(const mira::AgentLoopResult &result, std::uint64_t events_count,
-                             const std::string &bridge_stats_json) {
+                             const std::string &bridge_stats_json,
+                             const std::string &transport_stats_json,
+                             std::uint64_t user_messages_injected,
+                             std::uint64_t tool_events) {
     std::string steps;
     for (const auto &record : result.steps) {
         if (!steps.empty()) {
@@ -777,17 +920,22 @@ std::string loop_result_json(const mira::AgentLoopResult &result, std::uint64_t 
                       record.verified ? "true" : "false", json_escape(record.note).c_str());
         steps += buffer;
     }
-    char header[896];
+    char header[1152];
     std::snprintf(header, sizeof(header),
                   "{\"outcome\":\"%s\",\"summary\":\"%.320s\",\"steps_count\":%u,"
                   "\"recoveries\":%u,\"repairs\":%u,\"events\":%llu,\"steps\":[%s],"
-                  "\"bridge\":%s,\"mira_version\":\"%u.%u.%u\"}",
+                  "\"bridge\":%s,\"transport\":%s,"
+                  "\"user_messages_injected\":%llu,\"tool_events\":%llu,"
+                  "\"mira_version\":\"%u.%u.%u\"}",
                   mira::loop_outcome_name(result.outcome).c_str(),
                   json_escape(result.safe_summary).c_str(),
                   static_cast<unsigned>(result.steps.size()), result.recoveries,
                   result.repairs,
                   static_cast<unsigned long long>(events_count), steps.c_str(),
                   bridge_stats_json.empty() ? "{}" : bridge_stats_json.c_str(),
+                  transport_stats_json.empty() ? "{}" : transport_stats_json.c_str(),
+                  static_cast<unsigned long long>(user_messages_injected),
+                  static_cast<unsigned long long>(tool_events),
                   mira::kVersion.major, mira::kVersion.minor, mira::kVersion.patch);
     return header;
 }
@@ -902,8 +1050,11 @@ std::string begin_confirmation(std::uint64_t correlation, const std::string &eve
     item->target.type = "device";
     item->target.id = "primary";
     item->target.scope = "display0";
+    item->principal.tenant_id = g_confirmations.tenant_id;
+    item->principal.user_id = g_confirmations.user_id;
     item->principal.host_id = mira::HostInstanceId::generate();
     item->principal.auth_strength = mira::AuthenticationStrength::Session;
+    item->principal.authenticated_at = std::chrono::system_clock::now();
     item->action_summary = action_summary;
     item->risk_reason = risk_reason;
 
@@ -959,6 +1110,9 @@ std::int32_t resolve_confirmation(const std::string &challenge_hex, const std::s
     }
     mira::ConfirmationResponse response;
     response.challenge_id = item->challenge.id;
+    // consume 校验 response.user_id 与主体一致（P3 起未设置 → 一律
+    // "identity or nonce mismatch"；真机 2026-09-12 r3 场景首次执行暴露）。
+    response.user_id = item->principal.user_id;
     if (const auto nonce = mira::Id128::parse(nonce_hex); nonce.has_value()) {
         response.nonce = *nonce;
     }
@@ -1084,6 +1238,12 @@ std::int32_t open(const std::string &config_json) {
     runtime->loop_config.model_call_deadline = std::chrono::milliseconds(
         scripted ? 5'000 : parse_int_field(config, "call_timeout_ms", 30'000));
     runtime->loop_config.observation_max_age = std::chrono::milliseconds{2'000};
+    // DEC-015/016 预算（有界默认；干跑场景可收紧以覆盖拒绝/耗尽路径）。
+    runtime->loop_config.max_tool_executions = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        parse_int_field(config, "max_tool_executions", 32), 1, 1'024));
+    runtime->loop_config.max_pending_user_messages = static_cast<std::size_t>(
+        std::clamp<std::int64_t>(parse_int_field(config, "max_pending_user_messages", 16), 1,
+                                 64));
 
     executor::ExecutorConfig executor_config;
     executor_config.min_threads = 4;
@@ -1122,7 +1282,8 @@ std::int32_t open(const std::string &config_json) {
             (void)runtime->executor.shutdown(true);
             return -4;
         }
-        transport = std::make_shared<ScriptedTransport>(std::move(decisions));
+        runtime->scripted = std::make_shared<ScriptedTransport>(std::move(decisions));
+        transport = runtime->scripted;
         runtime->profile = build_profile("https://scripted.local", "/v1", "scripted", true);
     } else {
         if (!kotlin_transport_ready()) {
@@ -1133,6 +1294,22 @@ std::int32_t open(const std::string &config_json) {
         runtime->kotlin_transport = KotlinHttpTransport::create();
         transport = runtime->kotlin_transport;
         runtime->profile = build_profile(endpoint, api_prefix, model, dialect == "chat");
+    }
+
+    // DEC-015 工具注册表：宿主显式注册 Core 参考 wait（有界切片睡眠、可取消、
+    // 无副作用）；注册失败 fail-closed（不开会话）。后续工具同边界注册（POST-01）。
+    runtime->tools = std::make_shared<mira::BuiltinToolRegistry>();
+    {
+        auto wait_tool = mira::make_wait_tool();
+        const auto registered = runtime->tools->register_tool(std::move(wait_tool.spec),
+                                                              std::move(wait_tool.handler));
+        if (!registered.has_value()) {
+            __android_log_print(ANDROID_LOG_WARN, kLogTag, "wait tool registration failed: %s",
+                                registered.error().safe_message.c_str());
+            (void)runtime->adapter.reset();
+            (void)runtime->executor.shutdown(true);
+            return -4;
+        }
     }
 
     // wire 工件源接帧 store：截图部件的 data URL 字节经公共 store API 回读。
@@ -1206,9 +1383,22 @@ std::int32_t submit(const std::string &goal, std::int32_t max_steps) {
             context.deadline = clock::now() + std::chrono::milliseconds(total_timeout_ms);
             context.cancellation_requested = [&token]() { return token.stop_requested(); };
 
-            mira::AgentLoop loop(runtime.adapter, *runtime.gateway, runtime.loop_config);
-            loop.set_event_store(runtime.events, runtime.runtime_id, runtime.spec.session_id);
-            auto outcome = loop.run(runtime.spec, context, runtime.verifier);
+            // 受控实例持有（P3h 设计选型记录）：mira AgentLoop 自带线程安全邮箱
+            // （enqueue_user_message 任意线程可调，步边界 drained），bridge 持
+            // shared_ptr 仅覆盖 run 执行期间，不逃逸 Executor 生命周期；takeover
+            // 后（state=Takeover）不挂接——新消息在阻断态明确拒绝。
+            auto loop = std::make_shared<mira::AgentLoop>(runtime.adapter, *runtime.gateway,
+                                                          runtime.loop_config);
+            loop->set_event_store(runtime.events, runtime.runtime_id,
+                                  runtime.spec.session_id);
+            loop->set_tool_registry(runtime.tools);
+            {
+                std::lock_guard state_lock(g_loop_mutex);
+                if (runtime.state == LoopState::Running) {
+                    runtime.live_loop = loop;
+                }
+            }
+            auto outcome = loop->run(runtime.spec, context, runtime.verifier);
             mira::AgentLoopResult result;
             if (outcome.has_value()) {
                 result = std::move(outcome.value());
@@ -1216,13 +1406,31 @@ std::int32_t submit(const std::string &goal, std::int32_t max_steps) {
                 result.outcome = mira::LoopOutcome::Failed;
                 result.safe_summary = "loop failed: " + outcome.error().safe_message;
             }
+            // BUG-20260912-P3H-01 可诊断性：loop 结算落日志（无论终态如何必达；
+            // 缺失本行即 run 未返回——worker 卡在 run 内部）。
+            __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                "loop settled: %s (%u steps, %u recoveries) cancelled=%s",
+                                mira::loop_outcome_name(result.outcome).c_str(),
+                                static_cast<unsigned>(result.steps.size()), result.recoveries,
+                                token.stop_requested() ? "true" : "false");
 
             std::string bridge_stats;
             miracle_host_debug_stats_json(bridge_stats);
             const std::uint64_t events = runtime.events->size();
-            const std::string json = loop_result_json(result, events, bridge_stats);
+            const std::uint64_t injected = count_events(
+                *runtime.events, runtime.spec.session_id, "UserMessageInjected");
+            const std::uint64_t tool_events_count = count_events(
+                *runtime.events, runtime.spec.session_id, "ToolExecuted");
+            std::string transport_stats;
+            if (runtime.scripted != nullptr) {
+                transport_stats = runtime.scripted->stats_json();
+            }
+            const std::string json = loop_result_json(result, events, bridge_stats,
+                                                      transport_stats, injected,
+                                                      tool_events_count);
             {
                 std::lock_guard state_lock(g_loop_mutex);
+                runtime.live_loop.reset(); // 与状态翻转同临界区：enqueue 可见性原子
                 runtime.last_result_json = json;
                 if (runtime.state == LoopState::Running ||
                     runtime.state == LoopState::Takeover) {
@@ -1303,19 +1511,39 @@ std::string close() {
     (void)expire_confirmations();
     std::string bridge_stats;
     miracle_host_debug_stats_json(bridge_stats);
-    char summary[512];
-    std::snprintf(summary, sizeof(summary),
-                  "{\"ok\":%s,\"state\":\"%s\",\"goal\":\"%.128s\","
-                  "\"last_result\":%s,\"bridge\":%s,\"shutdown\":\"%s\"}",
-                  shutdown_ok ? "true" : "false",
-                  runtime->state == LoopState::Running
-                      ? "running"
-                      : runtime->state == LoopState::Takeover ? "takeover" : "open",
-                  json_escape(runtime->goal).c_str(),
-                  runtime->last_result_json.empty() ? "null"
-                                                    : runtime->last_result_json.c_str(),
-                  bridge_stats.empty() ? "{}" : bridge_stats.c_str(),
-                  shutdown_ok ? "Completed" : "Incomplete");
+    // 经 std::string 组装（不走定长 snprintf）：P3h 结果 JSON 变长
+    // （transport/事件计数字段 + 步进数组），任何定长截断都会破坏外层 JSON
+    // 合法性（真机 2026-09-12 tool 场景暴露：512 buffer 截断 →
+    // parseCloseSummary ParseError → closeOk 误判 false）。
+    const char *state_name = runtime->state == LoopState::Running
+                                 ? "running"
+                                 : runtime->state == LoopState::Takeover ? "takeover" : "open";
+    std::string goal_trimmed = runtime->goal;
+    if (goal_trimmed.size() > 128) { // 截断需落在 UTF-8 序列边界
+        goal_trimmed.resize(128);
+        while (!goal_trimmed.empty() &&
+               (static_cast<unsigned char>(goal_trimmed.back()) & 0xC0) == 0x80) {
+            goal_trimmed.pop_back(); // 多字节序列的后续字节
+        }
+        if (!goal_trimmed.empty() &&
+            static_cast<unsigned char>(goal_trimmed.back()) >= 0xC0) {
+            goal_trimmed.pop_back(); // 残缺序列的首字节
+        }
+    }
+    std::string summary = "{\"ok\":";
+    summary += shutdown_ok ? "true" : "false";
+    summary += ",\"state\":\"";
+    summary += state_name;
+    summary += "\",\"goal\":\"";
+    summary += json_escape(goal_trimmed);
+    summary += "\",\"last_result\":";
+    summary += runtime->last_result_json.empty() ? "null"
+                                                 : runtime->last_result_json;
+    summary += ",\"bridge\":";
+    summary += bridge_stats.empty() ? "{}" : bridge_stats;
+    summary += ",\"shutdown\":\"";
+    summary += shutdown_ok ? "Completed" : "Incomplete";
+    summary += "\"}";
     emit_loop_event("session", "{\"state\":\"closed\"}");
     return summary;
 }
@@ -1342,6 +1570,84 @@ std::string state_json() {
                       : g_loop->state == LoopState::Takeover ? "takeover" : "open",
                   json_escape(g_loop->goal).c_str(), pending_confirmations);
     return buffer;
+}
+
+std::string send_user_message(const std::string &text) {
+    // 长度/脱敏前置校验在 Kotlin 门面（UserMessagePolicy）；此处兜底空消息
+    // （mira enqueue 对空串拒绝，双层一致）。锁序：g_loop_mutex → AgentLoop
+    // 内部 pending 邮箱锁（叶子，drain 侧无反向路径）。
+    if (text.empty()) {
+        return "{\"ok\":false,\"error\":\"message is empty\"}";
+    }
+    std::shared_ptr<mira::AgentLoop> loop;
+    {
+        std::lock_guard lock(g_loop_mutex);
+        if (g_loop == nullptr) {
+            return "{\"ok\":false,\"error\":\"session is not open\"}";
+        }
+        if (g_loop->state != LoopState::Running) {
+            // Takeover/Open/Closed 一律拒绝：takeover 阻断新自主输入，Open 无活跃
+            // run 可注入（取消/shutdown 路径同样落此分支——明确结果，不静默丢弃）。
+            return "{\"ok\":false,\"error\":\"loop is not running\"}";
+        }
+        if (g_loop->live_loop == nullptr) {
+            return "{\"ok\":false,\"error\":\"loop instance is not attached\"}";
+        }
+        loop = g_loop->live_loop;
+    }
+    const auto queued = loop->enqueue_user_message(text);
+    if (!queued.has_value()) {
+        // 队列满（ResourceExhausted）等：拒绝结果对 UI 可见。
+        char buffer[320];
+        std::snprintf(buffer, sizeof(buffer), "{\"ok\":false,\"error\":\"%.256s\"}",
+                      json_escape(queued.error().safe_message).c_str());
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                            "user message rejected: length=%zu", text.size());
+        return buffer;
+    }
+    // 日志只记长度与摘要（脱敏纪律：消息原文不入日志/事件）。
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                        "user message queued: length=%zu", text.size());
+    return "{\"ok\":true}";
+}
+
+std::string conversation_json() {
+    std::shared_ptr<mira::MemoryEventStore> events;
+    mira::SessionId session{};
+    {
+        std::lock_guard lock(g_loop_mutex);
+        if (g_loop == nullptr) {
+            return "{\"ok\":false,\"error\":\"session is not open\"}";
+        }
+        events = g_loop->events;
+        session = g_loop->spec.session_id;
+    }
+    const auto view = mira::build_conversation_view(*events, session);
+    if (!view.has_value()) {
+        char buffer[384];
+        std::snprintf(buffer, sizeof(buffer), "{\"ok\":false,\"error\":\"%.256s\"}",
+                      json_escape(view.error().safe_message).c_str());
+        return buffer;
+    }
+    std::string entries;
+    for (const auto &entry : view.value()) {
+        if (!entries.empty()) {
+            entries += ",";
+        }
+        char buffer[768];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"kind\":\"%s\",\"text\":\"%.640s\",\"at_ms\":%lld}",
+                      entry.kind == mira::ConversationEntry::Kind::UserMessage
+                          ? "user_message"
+                          : "loop_outcome",
+                      json_escape(entry.text).c_str(),
+                      static_cast<long long>(
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              entry.recorded_at.wall.time_since_epoch())
+                              .count()));
+        entries += buffer;
+    }
+    return "{\"ok\":true,\"entries\":[" + entries + "]}";
 }
 
 std::string connectivity(const std::string &config_json) {

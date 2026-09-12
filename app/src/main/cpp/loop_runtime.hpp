@@ -60,6 +60,18 @@ std::string close();
 // 当前状态 JSON（state/goal/task_epoch/pending_confirmations）。
 std::string state_json();
 
+// —— 用户消息介入（DEC-016；P3h-03）——
+// 入队一条用户消息（步边界注入、常驻后续所有请求）。text 应已由 Kotlin 门面完成
+// 脱敏（长度上限 + 凭据模式过滤）。返回结果 JSON：{"ok":true} 或
+// {"ok":false,"error":"..."}（非运行态/空消息/队列满——拒绝路径对 UI 可见）。
+std::string send_user_message(const std::string &text);
+
+// —— 会话对话投影（DEC-016；P3h-04）——
+// build_conversation_view 的只读 JSON 投影（事件存储为唯一事实源）：
+// {"ok":true,"entries":[{"kind":"user_message"|"loop_outcome","text":..,"at_ms":..}]}
+// 或 {"ok":false,"error":"..."}。
+std::string conversation_json();
+
 // 一次性模型连通性自检（独立小栈，文本-only 决策请求），返回结果 JSON（阻塞调用）。
 std::string connectivity(const std::string &config_json);
 

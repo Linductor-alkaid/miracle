@@ -35,6 +35,30 @@ class SessionViewModel : ViewModel() {
     private val _startError = MutableStateFlow<String?>(null)
     val startError: StateFlow<String?> = _startError.asStateFlow()
 
+    /** 指令注入结果（一次性消费；null 值＝成功或无待显示项）。 */
+    private val _instructionError = MutableStateFlow<String?>(null)
+    val instructionError: StateFlow<String?> = _instructionError.asStateFlow()
+
+    /** 会话对话投影（DEC-016 只读；终态/注入后刷新）。 */
+    private val _conversation =
+        MutableStateFlow<List<dev.linductor.miracle.runtime.LoopEventParser.ConversationEntry>>(emptyList())
+    val conversation = _conversation.asStateFlow()
+
+    init {
+        // 终态后刷新会话投影（LoopSettled 已入存储）。
+        viewModelScope.launch {
+            AgentRuntime.state.collect { state ->
+                if (state is AgentRuntime.SessionState.Terminal) {
+                    refreshConversation()
+                }
+            }
+        }
+    }
+
+    fun refreshConversation() {
+        _conversation.value = AgentRuntime.conversation()
+    }
+
     /** 每次回到前台/授权返回后刷新准入状态。 */
     fun refreshGate(context: Context) {
         viewModelScope.launch {
@@ -73,6 +97,21 @@ class SessionViewModel : ViewModel() {
     fun resolveConfirmation(approve: Boolean) {
         val request = confirmation.value ?: return
         AgentRuntime.resolveConfirmation(request, approve)
+    }
+
+    /** 运行中介入指令（DEC-016；阻塞 JNI 在 Default 协程）。 */
+    fun sendInstruction(text: String) {
+        if (text.isBlank()) {
+            _instructionError.value = "请输入指令内容"
+            return
+        }
+        viewModelScope.launch(Dispatchers.Default) {
+            _instructionError.value = AgentRuntime.sendUserInstruction(text)
+        }
+    }
+
+    fun clearInstructionError() {
+        _instructionError.value = null
     }
 
     fun clearStartError() {

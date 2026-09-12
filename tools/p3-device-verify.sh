@@ -10,16 +10,17 @@
 #  - 通知/悬浮窗可经 adb 预授权（pm grant / appops）。
 #
 # 用法：tools/p3-device-verify.sh [serial] [scenario...]
-#   scenario ∈ setup|complete|max_steps|cancel|r3|connectivity|takeover
-#   默认：setup complete max_steps cancel r3 takeover（connectivity 需先在
-#   设置页配置真实 VLM 端点与密钥）。
+#   scenario ∈ setup|complete|max_steps|cancel|r3|connectivity|takeover|
+#              user_message|tool|tool_budget
+#   默认：setup complete max_steps cancel r3 takeover user_message tool
+#   tool_budget（connectivity 需先在设置页配置真实 VLM 端点与密钥）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="${ADB:-$HOME/Android/Sdk/platform-tools/adb}"
 PKG="dev.linductor.miracle"
 # 首参为序列号仅当它不是场景名（免序列号调用时自动忽略）
-SCENARIO_NAMES='setup|complete|max_steps|cancel|r3|connectivity|takeover'
+SCENARIO_NAMES='setup|complete|max_steps|cancel|r3|connectivity|takeover|user_message|tool|tool_budget'
 SERIAL=""
 if [ "$#" -gt 0 ] && ! printf '%s' "$1" | grep -qxE "$SCENARIO_NAMES"; then
     SERIAL="$1"
@@ -78,7 +79,7 @@ scenario_setup() {
     adb_cmd logcat -c
     adb_cmd shell am force-stop "$PKG" || true
     sleep 1
-    adb_cmd shell am start -n "$PKG/.MainActivity"
+    adb_cmd shell am start --activity-single-top -n "$PKG/.MainActivity"
     echo "!! 请在设备上完成投影授权（若此前已授权且服务已绑定则自动继续）…"
     if wait_logcat_match "host bound" 120; then
         echo "-- 投影会话已绑定（host bound）"
@@ -94,17 +95,17 @@ run_scenario() {
     adb_cmd logcat -c
     case "$scenario" in
     connectivity)
-        adb_cmd shell am start -n "$PKG/.MainActivity" \
+        adb_cmd shell am start --activity-single-top -n "$PKG/.MainActivity" \
             --es "$PKG.extra.AUTO_SCENARIO" connectivity
         ;;
     takeover)
         # 语义链路经 auto 场景驱动（admission 失效→取消→RELEASE_ALL→确认失效）；
         # 悬浮球长按手势为独立人工取证项（若已授权悬浮窗）。
-        adb_cmd shell am start -n "$PKG/.MainActivity" \
+        adb_cmd shell am start --activity-single-top -n "$PKG/.MainActivity" \
             --es "$PKG.extra.AUTO_SCENARIO" takeover
         ;;
     *)
-        adb_cmd shell am start -n "$PKG/.MainActivity" \
+        adb_cmd shell am start --activity-single-top -n "$PKG/.MainActivity" \
             --es "$PKG.extra.AUTO_SCENARIO" "$scenario"
         ;;
     esac
@@ -144,7 +145,7 @@ fi
 SCENARIOS=("$@")
 if [ ${#SCENARIOS[@]} -eq 0 ] || [ "${SCENARIOS[0]}" = "setup" ]; then
     scenario_setup
-    [ ${#SCENARIOS[@]} -le 1 ] && SCENARIOS=(complete max_steps cancel r3 takeover)
+    [ ${#SCENARIOS[@]} -le 1 ] && SCENARIOS=(complete max_steps cancel r3 takeover user_message tool tool_budget)
 else
     # 免安装直接跑场景：仍需投影已绑定
     wait_logcat_match "host bound" 10 || {

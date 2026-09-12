@@ -62,8 +62,8 @@ UI（组合函数 = 组件、状态驱动重组 = re-render、单向数据流）
 | 页面 | 内容 | 状态来源 |
 | --- | --- | --- |
 | Onboarding（首次/权限缺失时） | 显著披露（截图出设备、触控模拟）→ 分步授权向导（通知→悬浮窗→无障碍→投影）→ 每步系统返回后自检 | `SessionGate` |
-| Home 任务台 | 当前会话卡（状态相位、步数、动作计数、takeover 按钮）、新目标输入、历史任务列表 | `AgentRuntime` |
-| SessionDetail | 状态时间线（步进、动作摘要、验证结论）、事件流、（P4）replay 检视与截图引用 | 事件流 + 持久状态 |
+| Home 任务台 | 当前会话卡（状态相位、步数、动作计数、takeover 按钮）、新目标输入、历史任务列表、运行中介入输入（P3h：DEC-016 指令注入，步边界生效、常驻后续请求；拒绝原因内联呈现） | `AgentRuntime` |
+| SessionDetail | 状态时间线（步进、动作摘要、验证结论）、会话记录卡（P3h：DEC-016 对话投影——UserMessage/LoopOutcome 条目，事件存储重建、只读）、事件流、（P4）replay 检视与截图引用 | 事件流 + 持久状态 |
 | Settings | 提供商预设（P3 补充：内置目录一键套用端点/前缀/方言/模型建议值，仅需填 API key；mira 公共 API 无提供商注册表，预设含上游 mira docs/model_provider 已验证的 MiniMax/SiliconFlow，其余按各厂商公开 OpenAI 兼容端点配置（Configured 级），互操作以连通性自检为准）、模型端点/凭据（Keystore 加密）、预算与步数上限、R3 策略表开关、关于/版本 | DataStore |
 | ConfirmationDialog | R3 动作确认：动作摘要、风险说明、剩余时间 | `ConfirmationRequest` 流 |
 

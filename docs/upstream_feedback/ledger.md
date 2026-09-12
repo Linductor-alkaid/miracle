@@ -39,10 +39,16 @@
   导出）——工具经 `BuiltinToolSpec`（JSON Schema + 副作用声明）注册，AgentLoop
   挂载注册表后逐步执行 ToolProposals 并以 `mira.agent-loop.tool-result.v1`
   provenance 回填下一轮请求；同一 OperationId 至多派发一次，注册表级拒绝为循环
-  终态失败（fail-closed）；Core 附带 `wait` 参考工具。miracle 侧**关而未用**
-  （lock 仍钉 `874f4a5`）：lock 升级与最小采纳（注册 `wait` 验证链路）由
-  [P3h](../plans/p3h-mira-harness-alignment.md) 承载；L3 扩展工具层立项条件不变
-  （`POST-01`）。
+  终态失败（fail-closed）；Core 附带 `wait` 参考工具。
+- 采纳取证（2026-09-12，P3h-05 代码落地 + 真机验证）：miracle lock 升级 `5b55e14`
+  后在 `loop_runtime.cpp` 经公共边界注册 Core `wait`（`make_wait_tool` +
+  `register_tool`，注册失败 fail-closed 不开会话），`AgentLoop::set_tool_registry`
+  挂接。**真机取证（OnePlus Ace 3，2026-09-12）**：干跑场景 `tool` 通过——
+  ToolExecuted 事件 ×1（结果 JSON 取证字段）+ 下一轮请求回填（脚本化传输断言
+  `Tool results from the previous turn:` 标记可见）+ 终态 Completed；预算耗尽路径
+  （`max_tool_executions=1`）终态 Failed 且 ToolExecuted==1。配套修复：profile 补
+  `function_tools` 能力声明（挂载工具后路由查询要求该能力，真机首次真实任务
+  暴露）。L3 扩展工具层立项条件不变（`POST-01`）。
 - 分级：P3（当前未使用该能力，属方向性缺口）
 - 证据：mira `16e419e` 的 `src/model/agent_loop.cpp`："tool proposals are not executable
   in the M3 loop"；DEC-009/M7 Blocked。
