@@ -1,12 +1,13 @@
 # Miracle 总体架构设计
 
-> 状态：Proposed（P3 实现同步修订）
-> 版本：1.1
-> 更新日期：2026-09-06
+> 状态：Proposed（P3 实现同步修订；双平面消费路线按上游 mira DEC-014 方向修订）
+> 版本：1.2
+> 更新日期：2026-09-12
 > 上位文档：[可行性分析与方案](../feasibility-and-solution.md)、[工程规范](../project/project-standards.md)
 > 关联决策：[DEC-001 前端形态](../decisions/DEC-001-frontend-compose.md)、
 > [DEC-002 工具集路线](../decisions/DEC-002-agent-tool-set-route.md)、
-> [DEC-003 构建与设备基线](../decisions/DEC-003-build-device-baseline.md)
+> [DEC-003 构建与设备基线](../decisions/DEC-003-build-device-baseline.md)、
+> [DEC-004 mira 双平面消费路线](../decisions/DEC-004-mira-dual-plane-consumption.md)
 
 ## 1. 职责与边界
 
@@ -36,7 +37,10 @@
 │  runtime_glue：Executor 唯一 owner · mira 运行时组装 · 观察者   │
 ├──────────────────────────────────────────────────────────────┤
 │ mira（安装包消费，钉死 commit）                                  │
-│  AndroidHostAdapter → AgentLoop → ModelGateway → VLM(HTTPS)   │
+│  Agent Harness 控制平面：AndroidHostAdapter → AgentLoop →      │
+│    ModelGateway → VLM(HTTPS)；MiraRuntime 任务/会话/检查点      │
+│  Workflow 数据平面（M8–M14，P6 消费）：compiler / runtime /     │
+│    navigation / learning / recovery                            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,7 +60,12 @@
 | `bridge.host_abi_impl` | C++ | 实现 `mira_android_host_*` 全部符号；操作注册表（correlation→pending）；lease 生命周期 | （被 mira adapter 调用，无上层接口） |
 | `bridge.runtime_glue` | C++ | Executor 初始化/关闭（唯一 owner）、自检入口封送、JNI 注册 | JNI 导出（P3 实际面）：`loopOpen/loopSubmit/loopCancel/loopTakeover/loopClose/loopState`、`modelConnectivityTest`、`consentResolve`、`nativeHttpExchangeComplete` 等 |
 | `bridge.loop_runtime` | C++ | P3 新增：AgentLoop 组装（gateway/provider/admission/事件存储/verifier）、宿主 `IHttpTransport`（Kotlin HTTPS 执行 + C++ 协作等待）、脚本化干跑传输、R3 确认协议（`ConfirmationAuthority`） | 被 runtime_glue 调用；host_abi_impl 经其查询会话活跃/签发挑战 |
-| `mira`（上游） | C++ | Observe→Reason→Plan→Act→Verify 闭环、模型网关、持久状态 | `find_package(Mira)` 公共 API |
+| `mira`（上游） | C++ | Agent Harness 控制平面（闭环、模型网关、任务/会话状态机、持久状态）+ Workflow 数据平面（IR/编译/运行/导航/学习/恢复，M8–M14） | `find_package(Mira)` 公共 API |
+
+**消费现状注记（2026-09-12，lock `874f4a5`）**：P3 组装的是 AgentLoop 直驱子集
+（`MiraRuntime` 任务控制面未消费）；Workflow 平面模块已随安装包编译交付（Android 双
+ABI CI 门禁），miracle 侧零消费、零设备证据。消费顺序与范围见 §10 与
+[DEC-004](../decisions/DEC-004-mira-dual-plane-consumption.md)。
 
 ## 3. 一次任务闭环的数据流
 
@@ -80,6 +89,12 @@
 6. **收尾**：终态事件 → 通知与悬浮球归位 → 会话事件归档（mira EventStore/SQLite）→
    UI 时间线可回放（Replay，只读）。
 
+契约演进注记：mira DEC-016/017 落地后（lock 升级至 `5b55e14`，随
+[P3h](../plans/p3h-mira-harness-alignment.md)），第 5 步期间宿主可经
+`AgentLoop::enqueue_user_message` 注入运行中指令（步边界取出、常驻后续请求、入队
+前宿主负责脱敏）；任务终态化经 `MiraRuntime::complete_task` 收尾（P4 消费控制面时
+接线——成功任务不再滞留或以 `Cancelled` 记录；重复同终态 NoOp、冲突终态拒绝）。
+
 ## 4. 线程与生命周期模型
 
 | 执行上下文 | 归属 | 规则 |
@@ -95,7 +110,12 @@
 - `AgentForegroundService.onCreate` → 初始化 bridge（Executor initialize → 组装 mira
   运行时）→ 能力快照上报。
 - 任务提交/取消/takeover → `AgentRuntime` → bridge 入口；takeover 语义：阻断新决策、取消
-  在途输入、`RELEASE_ALL`、恢复前强制重新观察。
+  在途输入、`RELEASE_ALL`、恢复前强制重新观察。P3 由 bridge 自实现
+  （admission 失效 → Executor 取消 → `adapter->interrupt()`）；mira DEC-018 后
+  `MiraRuntime::request_human_takeover` 的 `Applied` 路径同样触发
+  `IEnvironment::interrupt()`（幂等、best-effort），且暂停/接管态 `begin_operation`
+  按 `InvalidState` 拒绝——P4 迁移到 runtime 控制面时采纳并测试该语义，单任务
+  `cancel_task` 不触发会话级中断（上游权衡，多任务共享环境）。
 - `onDestroy`（或受控关停）→ mira §17.2 关闭顺序：停止生产者 → 取消 → 排空 → 非 worker
   线程 `shutdown(true)` → 宿主 stop/destroy（lease 归零断言）。
 - 进程被杀恢复（P4）：`state_store` 检查点在 `filesDir` 持久化，重启后提示用户可恢复。
@@ -110,6 +130,12 @@ P3 粒度注记：mira `AgentLoop` 公共 API 无逐步观察者（仅终态 `Ag
 相位为宿主真实信号驱动的**粗投影**（capture 受理＝Observing、transport 执行＝
 Reasoning、input 受理＝Acting；终态与步进记录经结果 JSON）。逐相位/逐步实时投影以
 mira 提供观察者回调为前置（观察项，随上游反馈评估）；悬浮球呼吸＝活动指示。
+
+状态机注记：mira 侧 `Recovering` 原无生产者；DEC-017/023 后有两条——宿主显式
+`begin_task_recovery`（进入时退出自主动作，恢复回 Observing 且 epoch 递增）与
+WorkflowRun 升级载体（P6）。miracle 投影需在 P4 消费控制面时覆盖
+`Recovering/WaitingAgent/WaitingUser` 的呈现与宿主处置入口（恢复编排 DEC-031 的
+`need_user` 出口）。
 
 ## 6. 数据与凭据
 
@@ -141,5 +167,23 @@ Kotlin 侧异常与平台错误映射到 `MiraHostStatus`（fail-closed）：权
 
 ## 9. 非目标（本设计明确不做）
 
-多进程/远程服务；多显示与折叠态适配；连续控制（M6 已取消）；本地感知模型（M5 已取消）；
-闭环内自定义工具执行（P3+ 评估，见工具集设计 §6）；Play 商店上架流程。
+多进程/远程服务；多显示与折叠态适配；连续控制（mira M6 已取消）；本地感知模型
+（mira M5 已取消）；闭环内自定义工具执行（上游边界已就绪——mira DEC-015
+`BuiltinToolRegistry`，本仓库 `POST-01` 立项条件不变，见工具集设计 §6）；Play 商店
+上架流程；在 miracle 内自建第二套工作流/脚本设施（消费 mira Workflow 平面，见 §10）。
+
+## 10. 双平面消费路线（DEC-004）
+
+对齐 mira DEC-014（Agent Harness 控制平面 + Workflow 数据平面），miracle 的消费
+顺序冻结为四步，全部经 `find_package(Mira)` 公共 API，缺口走 `MIR-` 台账：
+
+| 阶段 | 里程碑 | 消费内容 | 宿主义务/关键点 |
+| --- | --- | --- | --- |
+| 契约对齐 | P3h | lock 升级 `874f4a5`→`5b55e14`；DEC-016 用户消息（`enqueue_user_message` + `build_conversation_view`）；DEC-015 工具注册表链路验证（注册 `wait`） | 入队文本宿主脱敏；消息队列有界（默认 16）拒绝路径可见；`MIR-20260905-002` 采纳取证 |
+| 控制面消费 | P4 | `MiraRuntime` 任务/会话生命周期替代 AgentLoop 直驱；DEC-017 `complete_task`、DEC-018 takeover `interrupt()` 与暂停态准入；`state_store` 落盘与恢复 | 终态幂等/冲突拒绝测试；`InvalidState` 新拒绝路径适配；replay 只读检视 |
+| 证据回流 | P5 | mira `MNT-202609-27` 消费证据报告（host tree、图像请求、决策修复复验、旋转/前后台/权限撤销/takeover/宿主销毁矩阵、A–F 组合任务） | 固定 mira 与 miracle commit 归档；直接支撑 mira M7 重定义（MNT-30） |
+| Workflow 平面 | P6（Proposed） | `workflow_compiler`/`workflow_runtime`（DryRun→Strict）、升级 `WaitingAgent` 处置、`WorkflowRecoveryOrchestrator` 装配、lesson 记录 | DEC-031 宿主义务（`notify_escalation`、`record_recovery_lesson`、Executor worker 预算 ≥ `max_concurrent_attempts + max_concurrent_async_drives`）；`need_user`/预算耗尽出口接 SessionGate 处置 UI |
+
+方向跟踪（不预建实现）：mira DEC-032 分层上下文（Hot/Warm/Cold + 五层管线）实现
+未开始；其 Stage E 验收依赖 miracle 真机实测（内存/延迟/功耗），mira 公共契约就绪
+后另行立项；遵守其非目标——Android 侧不打包大型生成模型、不引入完整向量数据库。
