@@ -164,7 +164,19 @@ object AgentRuntime {
             returnToHome(context)
             delayForHomeTransition()
         }
-        val submitted = HostBridge.loopSubmit(goal, config.maxSteps)
+        // 干跑场景的 maxSteps 来自脚本配置（loopOpen 已应用）；此前误用设置页
+        // 值覆盖，导致 max_steps 场景上限失效（脚本耗尽终态，真机 2026-09-12
+        // 暴露）。真实任务沿用设置页配置。
+        val effectiveMaxSteps = if (script != null) {
+            try {
+                org.json.JSONObject(script).optInt("max_steps", 0)
+            } catch (_: org.json.JSONException) {
+                0
+            }.takeIf { it > 0 } ?: config.maxSteps
+        } else {
+            config.maxSteps
+        }
+        val submitted = HostBridge.loopSubmit(goal, effectiveMaxSteps)
         if (submitted != 1) {
             closeSession(recordResult = false)
             return "任务提交失败（$submitted）"
@@ -236,6 +248,64 @@ object AgentRuntime {
         val outcome = HostBridge.consentResolve(request.challenge, request.nonce, approve)
         _confirmation.value = null
         return outcome == 0 || outcome == 1
+    }
+
+    /**
+     * 运行中介入：入队一条用户指令（DEC-016；步边界注入、常驻后续所有请求）。
+     *
+     * 入队前经 [UserMessagePolicy] 脱敏（长度/凭据过滤）；日志只记长度与摘要。
+     * 拒绝路径（非运行态/空消息/队列满）以明确 reason 返回，UI 呈现，不静默丢弃。
+     * 指令不是授权：高风险动作仍走 R3 确认（同意边界不变）。
+     *
+     * @return null＝已入队；非空＝拒绝原因。
+     */
+    fun sendUserInstruction(rawText: String): String? {
+        val verdict = UserMessagePolicy.sanitize(rawText)
+        if (verdict is UserMessagePolicy.Verdict.Rejected) {
+            return verdict.reason
+        }
+        val text = (verdict as UserMessagePolicy.Verdict.Accepted).text
+        val state = _state.value
+        if (!sessionOpen || state !is SessionState.Running || state.takeover) {
+            return "任务未在运行（无法注入）"
+        }
+        val resultJson = try {
+            HostBridge.loopSendUserMessage(text)
+        } catch (error: UnsatisfiedLinkError) {
+            return "native 库不可用"
+        }
+        val ok = try {
+            org.json.JSONObject(resultJson).optBoolean("ok")
+        } catch (_: org.json.JSONException) {
+            false
+        }
+        if (!ok) {
+            val reason = try {
+                org.json.JSONObject(resultJson).optString("error", "入队失败")
+            } catch (_: org.json.JSONException) {
+                "入队失败"
+            }
+            appendTimeline("指令入队被拒绝：$reason")
+            Log.i(TAG, "instruction rejected: len=${text.length} digest=${UserMessagePolicy.logDigest(text)}")
+            return reason
+        }
+        appendTimeline(
+            "已注入指令（下一步生效，持续整个任务）：len=${text.length} " +
+                "digest=${UserMessagePolicy.logDigest(text)}",
+        )
+        return null
+    }
+
+    /** 会话对话投影（DEC-016 只读；事件存储为唯一事实源）。会话未开启返回空表。 */
+    fun conversation(): List<LoopEventParser.ConversationEntry> {
+        if (!sessionOpen) {
+            return emptyList()
+        }
+        return try {
+            LoopEventParser.parseConversation(HostBridge.loopConversation())
+        } catch (_: UnsatisfiedLinkError) {
+            emptyList()
+        }
     }
 
     /** 传输就绪（native kotlin_transport_ready 探测）。 */

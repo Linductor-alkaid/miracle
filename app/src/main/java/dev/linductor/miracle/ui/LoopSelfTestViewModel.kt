@@ -81,8 +81,14 @@ class LoopSelfTestViewModel : ViewModel() {
      * ② max_steps：maxSteps=2 + 4×tap 脚本，断言 MaxSteps；
      * ③ cancel：提交 1.5s 后协作取消，断言 Cancelled；
      * ④ r3：目标含"发送"（策略从严），tap 前触发 R3 确认弹窗（批准后完成）；
-     * ⑤ takeover：提交 1.5s 后 Human Takeover（阻断新决策 + 取消 + RELEASE_ALL +
-     *    确认失效），断言 Cancelled 且关闭干净。
+     * takeover：悬浮球长按驱动（真机取证脚本），本卡无按钮；
+     * ⑤ user_message（P3h-03）：运行中注入指令（断言请求可见）+ 突发 8 连发验证
+     *    队列满拒绝（max_pending=1）+ 会话投影含 UserMessageInjected + 关闭后
+     *    注入明确拒绝——四路径取证；
+     * ⑥ tool（P3h-05）：脚本注入 wait 工具调用，断言 ToolExecuted 计数、下一轮
+     *    请求回填（mira.agent-loop.tool-result.v1 标记）与终态 Completed；
+     * ⑦ tool_budget：max_tool_executions=1 + 两次 wait 调用，断言预算耗尽终态
+     *    Failed。
      */
     fun runDryRun(context: Context, scenario: String) {
         if (_dryRun.value is DryRunState.Running || AgentRuntime.sessionOpen) {
@@ -91,18 +97,47 @@ class LoopSelfTestViewModel : ViewModel() {
         resetTapCount()
         _dryRun.value = DryRunState.Running(scenario)
         viewModelScope.launch(Dispatchers.Default) {
-            val (goal, maxSteps, decisions) = when (scenario) {
+            val goal: String
+            val maxSteps: Int
+            val decisions: List<JSONObject>
+            when (scenario) {
                 "complete", "r3" -> {
                     val tap = tapDecision()
-                    Triple(
-                        if (scenario == "r3") "发送测试消息" else "点击靶点两次",
-                        8,
-                        listOf(tap, tap, doneDecision()),
-                    )
+                    goal = if (scenario == "r3") "发送测试消息" else "点击靶点两次"
+                    maxSteps = 8
+                    decisions = listOf(tap, tap, doneDecision())
                 }
 
-                "max_steps" -> Triple("不断点击靶点", 2, List(4) { tapDecision() })
-                "cancel", "takeover" -> Triple("点击靶点", 8, List(4) { tapDecision() })
+                "max_steps" -> {
+                    goal = "不断点击靶点"
+                    maxSteps = 2
+                    decisions = List(4) { tapDecision() }
+                }
+
+                "cancel", "takeover" -> {
+                    goal = "点击靶点"
+                    maxSteps = 8
+                    decisions = List(4) { tapDecision() }
+                }
+
+                "user_message" -> {
+                    goal = "点击靶点后完成"
+                    maxSteps = 8
+                    decisions = List(5) { tapDecision() } + doneDecision()
+                }
+
+                "tool" -> {
+                    goal = "等待片刻后完成"
+                    maxSteps = 8
+                    decisions = listOf(waitToolCall(600), doneDecision())
+                }
+
+                "tool_budget" -> {
+                    goal = "连续等待后完成"
+                    maxSteps = 8
+                    decisions = listOf(waitToolCall(200), waitToolCall(200), doneDecision())
+                }
+
                 else -> {
                     _dryRun.value = DryRunState.Done(scenario, "Unknown", false, "未知场景")
                     return@launch
@@ -112,8 +147,12 @@ class LoopSelfTestViewModel : ViewModel() {
                 .put("transport", "scripted")
                 .put("max_steps", maxSteps)
                 .put("script", JSONArray(decisions))
-                .toString()
-            val error = AgentRuntime.startSession(context, goal, script = config)
+            when (scenario) {
+                // 突发注入路径需要确定性队列上限（默认 16 在单步窗口内难打满）。
+                "user_message" -> config.put("max_pending_user_messages", 1)
+                "tool_budget" -> config.put("max_tool_executions", 1)
+            }
+            val error = AgentRuntime.startSession(context, goal, script = config.toString())
             if (error != null) {
                 android.util.Log.i(
                     "miracle/verify",
@@ -121,6 +160,28 @@ class LoopSelfTestViewModel : ViewModel() {
                 )
                 _dryRun.value = DryRunState.Done(scenario, "OpenFailed", false, error)
                 return@launch
+            }
+            // 结果事件采集（transport 断言投影在结果 JSON 内）。
+            var resultEvent: LoopEventParser.LoopEvent.LoopResultEvent? = null
+            val collector = viewModelScope.launch {
+                AgentRuntime.events.collect { event ->
+                    if (event is LoopEventParser.LoopEvent.LoopResultEvent) {
+                        resultEvent = event
+                    }
+                }
+            }
+            // 注入序列结果（main 协程写、Default 协程断言读：原子引用保证可见性）。
+            val injectionRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
+            val burstAcceptedRef = java.util.concurrent.atomic.AtomicInteger(0)
+            val burstRejectedRef = java.util.concurrent.atomic.AtomicInteger(0)
+            if (scenario == "user_message") {
+                launchUserMessageSequence(
+                    onFirst = { injectionRef.set(it) },
+                    onBurst = { accepted, queueFull ->
+                        burstAcceptedRef.set(accepted)
+                        burstRejectedRef.set(queueFull)
+                    },
+                )
             }
             if (scenario == "cancel") {
                 launchCancelAfterDelay()
@@ -132,7 +193,10 @@ class LoopSelfTestViewModel : ViewModel() {
             val terminal = withTimeoutOrNull(60_000) {
                 AgentRuntime.state.first { it is AgentRuntime.SessionState.Terminal }
             } as? AgentRuntime.SessionState.Terminal
+            val conversation =
+                if (scenario == "user_message") AgentRuntime.conversation() else emptyList()
             val closeSummary = AgentRuntime.closeSession() ?: "{}"
+            collector.cancel()
             val (closeOk, shutdown, _) = LoopEventParser.parseCloseSummary(closeSummary)
             if (terminal == null) {
                 android.util.Log.i(
@@ -143,25 +207,102 @@ class LoopSelfTestViewModel : ViewModel() {
                 return@launch
             }
             val tapExpectation = if (scenario == "complete" || scenario == "r3") 2 else 0
-            val ok = when (scenario) {
+            val result = resultEvent?.result
+            val ok: Boolean
+            val detail = StringBuilder()
+                .append("终态 ${terminal.outcome}")
+                .append(" · 靶点 ${_tapCount.value} 次")
+                .append(" · 关闭 $shutdown")
+                .also { builder ->
+                    terminal.summary.takeIf { it.isNotBlank() }
+                        ?.let { builder.append(" · $it") }
+                }
+            when (scenario) {
                 "complete", "r3" ->
-                    terminal.ok && _tapCount.value >= tapExpectation && closeOk
-                "max_steps" -> terminal.outcome == "MaxSteps" && closeOk
-                "cancel", "takeover" -> terminal.outcome == "Cancelled" && closeOk
-                else -> false
+                    ok = terminal.ok && _tapCount.value >= tapExpectation && closeOk
+
+                "max_steps" -> ok = terminal.outcome == "MaxSteps" && closeOk
+                "cancel", "takeover" -> ok = terminal.outcome == "Cancelled" && closeOk
+
+                "user_message" -> {
+                    // 四路径：正常注入（请求可见 + 事件）+ 队列满拒绝 + 关闭后拒绝。
+                    val injection = injectionRef.get()
+                    val burstAccepted = burstAcceptedRef.get()
+                    val burstRejectedQueueFull = burstRejectedRef.get()
+                    val injectedEvent = conversation.any {
+                        it.kind == "user_message" && it.text.contains("靶点")
+                    }
+                    val sawFollowup = result?.transport?.sawFollowup == true
+                    val postClose = AgentRuntime.sendUserInstruction("关闭后再注入")
+                    ok = terminal.ok && injection == null && sawFollowup &&
+                        injectedEvent && burstRejectedQueueFull >= 1 && postClose != null &&
+                        closeOk
+                    detail.append(" · 注入${if (injection == null) "✓" else "✗($injection)"}")
+                    detail.append(" · 请求可见${if (sawFollowup) "✓" else "✗"}")
+                    detail.append(
+                        " · 队列满拒绝 $burstRejectedQueueFull 次" +
+                            "（突发 ${burstAccepted + burstRejectedQueueFull}）",
+                    )
+                    detail.append(" · 关闭后拒绝${if (postClose != null) "✓" else "✗"}")
+                }
+
+                "tool" -> {
+                    val toolStep = result?.steps?.any {
+                        it.summary.contains("tool:wait") || it.note.contains("executed 1 tool call")
+                    } == true
+                    val sawToolResult = result?.transport?.sawToolResult == true
+                    val toolEvents = result?.toolEvents ?: 0L
+                    ok = terminal.ok && toolStep && sawToolResult && toolEvents >= 1 && closeOk
+                    detail.append(" · 工具步${if (toolStep) "✓" else "✗"}")
+                    detail.append(" · 回填可见${if (sawToolResult) "✓" else "✗"}")
+                    detail.append(" · ToolExecuted $toolEvents 次")
+                }
+
+                "tool_budget" -> {
+                    val exhausted = terminal.summary.contains("tool execution budget exhausted") ||
+                        (terminal.outcome == "Failed" &&
+                            result?.summary?.contains("budget exhausted") == true)
+                    val toolEvents = result?.toolEvents ?: 0L
+                    ok = !terminal.ok && exhausted && toolEvents == 1L && closeOk
+                    detail.append(" · 预算耗尽${if (exhausted) "✓" else "✗"}")
+                    detail.append(" · ToolExecuted $toolEvents 次（预期 1）")
+                }
+
+                else -> ok = false
             }
-            val detail = buildString {
-                append("终态 ${terminal.outcome}")
-                append(" · 靶点 ${_tapCount.value} 次")
-                append(" · 关闭 $shutdown")
-                terminal.summary.takeIf { it.isNotBlank() }?.let { append(" · $it") }
-            }
+            val detailText = detail.toString()
             android.util.Log.i(
                 "miracle/verify",
-                "dryrun scenario=$scenario outcome=${terminal.outcome} ok=$ok detail=$detail",
+                "dryrun scenario=$scenario outcome=${terminal.outcome} ok=$ok detail=$detailText",
             )
-            _dryRun.value = DryRunState.Done(scenario, terminal.outcome, ok, detail)
+            _dryRun.value = DryRunState.Done(scenario, terminal.outcome, ok, detailText)
         }
+    }
+
+    /**
+     * user_message 场景的注入序列（P3h-03 四路径驱动）：
+     * 800ms 后注入一条指令（记录首条结果）；随后突发 8 条（max_pending=1 下
+     * 确定性触发队列满拒绝；步边界 drain 不影响"至少一条拒绝"断言）。
+     */
+    private fun launchUserMessageSequence(
+        onFirst: (String?) -> Unit,
+        onBurst: (accepted: Int, queueFull: Int) -> Unit,
+    ): Job = viewModelScope.launch {
+        delay(800)
+        onFirst(AgentRuntime.sendUserInstruction("继续以靶点为动作对象"))
+        var accepted = 0
+        var queueFull = 0
+        repeat(8) {
+            val rejection = AgentRuntime.sendUserInstruction("突发指令 $it")
+            if (rejection == null) {
+                accepted += 1
+            } else if (rejection.contains("queue is full") ||
+                rejection.contains("队列已满")
+            ) {
+                queueFull += 1
+            }
+        }
+        onBurst(accepted, queueFull)
     }
 
     private fun launchCancelAfterDelay(): Job = viewModelScope.launch {
@@ -183,4 +324,13 @@ class LoopSelfTestViewModel : ViewModel() {
     private fun doneDecision(): JSONObject = JSONObject()
         .put("action", "done")
         .put("reason", "script complete")
+
+    /** wait 工具调用脚本条目（DEC-015；ScriptedTransport 按该形态生成 tool_calls wire）。 */
+    private fun waitToolCall(durationMs: Int): JSONObject = JSONObject()
+        .put(
+            "tool_call",
+            JSONObject()
+                .put("name", "wait")
+                .put("arguments", JSONObject().put("duration_ms", durationMs)),
+        )
 }

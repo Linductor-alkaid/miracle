@@ -25,11 +25,20 @@ IHttpTransport + R3 确认协议 + 双前端全功能交付；单测 48/48、全
 
 **2026-09-12 上游对齐**：mira 已演进至 `5b55e14`（自锁定 `874f4a5` 起 49 个提交）：
 DEC-014 冻结 Agent Harness/Workflow 双平面架构，M8–M14 交付 Workflow 全链路
-（Android 双 ABI CI 门禁、零设备证据），DEC-015/016/017/018 关闭 harness 契约缺口，
+（Android 双 ABI CI 门禁，零设备证据），DEC-015/016/017/018 关闭 harness 契约缺口，
 DEC-032 冻结分层上下文方向（未实现）。miracle 消费路线按
 [DEC-004](../decisions/DEC-004-mira-dual-plane-consumption.md) 冻结：新增 P3h
 （契约对齐）与 P6（Workflow 平面消费），P4 扩展 `MiraRuntime` 控制面消费，P5 吸收
 mira `MNT-202609-27` 消费证据义务；lock 升级走 P3h 独立变更。
+
+**P3h 完成（2026-09-12）**：lock 升级 `5b55e14` 全量门禁回归（单测 73/73）；DEC-016
+用户消息介入（受控实例持有 + `UserMessagePolicy` 脱敏 + 任务页注入 UI + 会话投影）
+与 DEC-015 工具链路（Core `wait` 注册 + 干跑场景）落地并**真机全链验证**：干跑矩阵
+六场景全绿（user_message 四路径/tool 链路/预算耗尽）+ R3 协议 4×approved + 悬浮球
+takeover + **真实任务 29s 三步至 Completed**。真机轮暴露并修复 6 项缺陷（含
+P3 起潜伏的 R3 主体身份×2、场景 maxSteps 覆盖，与真实任务挂起根因——传输取消
+通知持锁 JNI 自死锁 `BUG-20260912-P3H-01`）。详见
+[p3h-mira-harness-alignment.md](p3h-mira-harness-alignment.md)（Completed）。
 
 ## 2. 交付边界（SCOPE）
 
@@ -74,7 +83,7 @@ mira `MNT-202609-27` 消费证据义务；lock 升级走 P3h 独立变更。
 | P1 | 截屏链路：MediaProjection UX、capture_frame、lease、epoch | v0.1.0-alpha | [p1-screen-capture.md](p1-screen-capture.md)（Completed） |
 | P2 | 输入链路：dispatchGesture 全集、取消、RELEASE_ALL、输入安全矩阵 | v0.2.0-alpha | [p2-input-dispatch.md](p2-input-dispatch.md)（Completed） |
 | P3 | 闭环 MVP：AgentLoop+模型配置、双前端全功能、披露/确认/接管 | v0.3.0 | [p3-loop-mvp.md](p3-loop-mvp.md)（In Progress：代码完成，首轮真机闭环通过，"≥3 类任务"取证欠账） |
-| P3h | mira Harness 对齐（DEC-004）：lock 升级 `5b55e14`、DEC-016 用户消息介入、DEC-015 工具注册表链路、契约回归 | v0.3.2 | [p3h-mira-harness-alignment.md](p3h-mira-harness-alignment.md)（Planned） |
+| P3h | mira Harness 对齐（DEC-004）：lock 升级 `5b55e14`、DEC-016 用户消息介入、DEC-015 工具注册表链路、契约回归 | v0.3.2 | [p3h-mira-harness-alignment.md](p3h-mira-harness-alignment.md)（Completed，2026-09-12 真机全链验证） |
 | P3x | 闭环增强：视觉定位（无障碍树 + Set-of-Mark、target_mark 协议） | v0.3.1 | [p3x-visual-grounding.md](p3x-visual-grounding.md)（Proposed；与 P3h 无依赖，可并行） |
 | P4 | 有状态：`MiraRuntime` 控制面消费（DEC-017 `complete_task`、DEC-018 takeover）、state_store 落盘、崩溃恢复、replay 检视 | v0.4.0 | `p4-stateful.md`（待建） |
 | P5 | 验证报告与上游回流（含 mira `MNT-202609-27` 消费证据归档，支撑 M7 重定义） | v0.5.0（评估报告） | `p5-validation-report.md`（待建） |

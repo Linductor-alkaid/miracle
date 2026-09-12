@@ -2,6 +2,65 @@
 
 本文件记录版本级变化（工程规范 §10.5）。格式遵循 Keep a Changelog；版本号与 Git tag 对应。
 
+## [未发布] P3h：mira Harness 对齐（lock `5b55e14`）
+
+### 新增
+
+- 用户消息介入（DEC-016，P3h-03）：运行中任务页可注入补充指令——`AgentRuntime.
+  sendUserInstruction`（入队前 `UserMessagePolicy` 脱敏：trim/长度上限 1024/凭据
+  启发式命中即拒绝，日志只记长度与 sha256 摘要）→ JNI `loopSendUserMessage` →
+  mira `AgentLoop::enqueue_user_message`（线程安全邮箱，步边界注入、常驻后续所有
+  请求）。bridge 采用**受控实例持有**（`live_loop` 仅 run 执行期间存活，终态清理与
+  状态翻转同临界区）；非运行态/队列满/空消息拒绝原因对 UI 可见。指令不是授权：
+  高风险动作仍走 R3 确认。
+- 会话对话投影（DEC-016，P3h-04）：任务页新增"会话记录（事件存储投影 · 只读）"卡，
+  经 `build_conversation_view` 重建（`UserMessage`/`LoopOutcome` 条目；事件存储为
+  唯一事实源）。
+- wait 工具链路（DEC-015，P3h-05）：会话打开时经公共 `BuiltinToolRegistry` 注册
+  Core `wait`（注册失败 fail-closed 不开会话），`AgentLoop::set_tool_registry`
+  挂载；`max_tool_executions`/`max_pending_user_messages` 暴露为会话配置（默认
+  32/16）。台账 `MIR-20260905-002` 采纳注记回写。
+- 干跑场景 ⑤ 指令注入（四路径：注入成功+请求可见 / 突发 8 连发队列满拒绝
+  （max_pending=1）/ 空消息策略拒绝 / 关闭后明确拒绝）、⑥ wait 工具（ToolExecuted
+  计数 + `mira.agent-loop.tool-result.v1` 回填标记 + Completed）、⑦ 工具预算耗尽
+  （`max_tool_executions=1` 终态 Failed）；`ScriptedTransport` 支持 `tool_call`
+  脚本条目（tool_calls wire）与请求标记断言投影；`p3-device-verify.sh` 默认矩阵
+  追加三项。
+
+### 变更
+
+- mira lock 升级独立变更：`874f4a5` → `5b55e14`（49 提交：DEC-014 双平面、M8–M14
+  Workflow、DEC-015/016/017/018 harness 契约）；公共 API 差异清单归档
+  （docs/compatibility/mira-5b55e14.md）；既有消费面零源码级破坏（`build_request`
+  为上游内部调用面、无 `CommandKind` 穷举）。Workflow 平面新头（10 个）随包编译
+  交付，miracle 零消费（P6）。
+
+### 验证
+
+- `install-mira.sh --force` 全新构建安装通过；`./gradlew assembleDebug lintDebug
+  testDebugUnitTest` 全绿（单测 73/73，新增 11：UserMessagePolicy 7、
+  LoopEventParser +4——会话投影解析、transport 断言字段、缺失容忍）；native 独立
+  编译零警告；bridge 零线程创建复核。
+- 真机（OnePlus Ace 3，2026-09-12，证据 build/p3-device-evidence/）：干跑矩阵六
+  场景全绿（complete/max_steps/cancel/user_message 四路径/tool/tool_budget）；R3
+  确认协议两轮 4×挑战全部 approved（签发→弹窗→consume→派发→Completed）；悬浮球
+  长按 takeover（timeline + 已接管状态 + RELEASE_ALL 路径）；会话投影卡与运行中
+  介入卡真机呈现；**真实任务 29 秒三步至 Completed**（tap 设置 → tap 显示与亮度
+  → done；exchange 1.28MB→161KB→208KB 截图载荷全通）。
+- 真机暴露并当场修复的缺陷（本地门禁不可见路径）：① profile 缺 `function_tools`
+  能力声明（挂载 wait 后路由拒绝全部真实会话模型调用）；② close() 摘要定长
+  buffer 截断（结果 JSON 变长后 parseCloseSummary ParseError）；③ 干跑场景
+  maxSteps 被设置页值覆盖（max_steps 场景自 P3 起从未真正生效）；④ R3 签发
+  principal.user_id / consume response.user_id 缺失（P3 起确认协议真机从未走通，
+  fail-closed 掩盖）；⑤ 取证脚本 am start 缺 --activity-single-top（ColorOS 下
+  onNewIntent 不触发）；⑥ **传输取消通知自死锁（BUG-20260912-P3H-01）**——
+  `notify_cancel` 在持有 `exchange->mutex` 窗口内经 JNI 同线程重入 `complete()`
+  再取同一锁 → loop worker 永久冻结（停止/takeover 失效、真实任务挂起的根因）；
+  修复：锁外通知，恰好一次语义保持。触发面：真实传输上传 write 无限阻塞（
+  `SO_TIMEOUT` 不约束写）+ deadline 取消链路——修复后该链路有界化。
+- 遗留登记：真实传输「停止」负向路径修复后未再实测（机制与干跑 cancel 等价，
+  下次真机轮顺带补）；自检页 P3 卡在滚动列表下方（靶点断言需预滚动，UI 后续项）。
+
 ## [未发布] P3
 
 ### 新增

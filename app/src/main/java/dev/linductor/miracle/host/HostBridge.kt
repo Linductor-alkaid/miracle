@@ -352,6 +352,14 @@ object HostBridge {
     @JvmStatic
     external fun loopState(): String
 
+    /** P3h 用户消息入队（DEC-016；步边界注入）。返回结果 JSON（ok/error）。 */
+    @JvmStatic
+    external fun loopSendUserMessage(text: String): String
+
+    /** P3h 会话对话投影（DEC-016 build_conversation_view 只读 JSON）。 */
+    @JvmStatic
+    external fun loopConversation(): String
+
     /** 模型连通性自检（阻塞；文本-only 决策请求），返回结果 JSON。 */
     @JvmStatic
     external fun modelConnectivityTest(configJson: String): String

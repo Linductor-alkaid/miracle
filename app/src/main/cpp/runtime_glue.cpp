@@ -1044,6 +1044,34 @@ jstring JNICALL native_loop_state(JNIEnv *env, jclass /*clazz*/) {
     }
 }
 
+jstring JNICALL native_loop_send_user_message(JNIEnv *env, jclass /*clazz*/, jstring text) {
+    try {
+        if (text == nullptr) {
+            return make_string(env, "{\"ok\":false,\"error\":\"message is empty\"}");
+        }
+        const char *chars = env->GetStringUTFChars(text, nullptr);
+        if (chars == nullptr) {
+            return make_string(env, "{\"ok\":false,\"error\":\"jni read failed\"}");
+        }
+        const std::string message = chars;
+        env->ReleaseStringUTFChars(text, chars);
+        const std::string result = miracle::bridge::loop::send_user_message(message);
+        return make_string(env, result);
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "send user message exception");
+        return make_string(env, "{\"ok\":false,\"error\":\"native exception\"}");
+    }
+}
+
+jstring JNICALL native_loop_conversation(JNIEnv *env, jclass /*clazz*/) {
+    try {
+        return make_string(env, miracle::bridge::loop::conversation_json());
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "conversation view exception");
+        return make_string(env, "{\"ok\":false,\"error\":\"native exception\"}");
+    }
+}
+
 jstring JNICALL native_model_connectivity(JNIEnv *env, jclass /*clazz*/, jstring config) {
     try {
         if (config == nullptr) {
@@ -1174,6 +1202,10 @@ const JNINativeMethod kHostBridgeMethods[] = {
     {"loopTakeover", "()I", reinterpret_cast<void *>(&native_loop_takeover)},
     {"loopClose", "()Ljava/lang/String;", reinterpret_cast<void *>(&native_loop_close)},
     {"loopState", "()Ljava/lang/String;", reinterpret_cast<void *>(&native_loop_state)},
+    {"loopSendUserMessage", "(Ljava/lang/String;)Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_loop_send_user_message)},
+    {"loopConversation", "()Ljava/lang/String;",
+     reinterpret_cast<void *>(&native_loop_conversation)},
     {"modelConnectivityTest", "(Ljava/lang/String;)Ljava/lang/String;",
      reinterpret_cast<void *>(&native_model_connectivity)},
     {"consentResolve", "(Ljava/lang/String;Ljava/lang/String;Z)I",

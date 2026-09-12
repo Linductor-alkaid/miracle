@@ -123,4 +123,66 @@ class LoopEventParserTest {
         assertEquals("Incomplete", shutdown2)
         assertTrue(result!!.contains("Cancelled"))
     }
+
+    @Test
+    fun `解析终态结果含 transport 断言投影与事件计数`() {
+        val json = """
+            {"kind":"result","payload":{
+              "outcome":"Completed","summary":"goal achieved",
+              "steps_count":2,"recoveries":0,"repairs":0,"events":10,
+              "steps":[],"bridge":{},
+              "transport":{"requests":3,"saw_followup":true,"saw_tool_result":true},
+              "user_messages_injected":1,"tool_events":1,
+              "mira_version":"0.1.0"}}
+        """.trimIndent()
+        val result =
+            (LoopEventParser.parse(json) as LoopEventParser.LoopEvent.LoopResultEvent).result
+        assertEquals(3L, result.transport?.requests)
+        assertTrue(result.transport?.sawFollowup == true)
+        assertTrue(result.transport?.sawToolResult == true)
+        assertEquals(1L, result.userMessagesInjected)
+        assertEquals(1L, result.toolEvents)
+    }
+
+    @Test
+    fun `终态结果缺失 transport 与计数时容忍默认`() {
+        val result = (
+            LoopEventParser.parse(
+                """{"kind":"result","payload":{"outcome":"Failed","summary":"x"}}""",
+            ) as LoopEventParser.LoopEvent.LoopResultEvent
+            ).result
+        assertNull(result.transport)
+        assertEquals(0L, result.userMessagesInjected)
+        assertEquals(0L, result.toolEvents)
+    }
+
+    @Test
+    fun `解析会话对话投影条目`() {
+        val json = """
+            {"ok":true,"entries":[
+              {"kind":"user_message","text":"继续以靶点为动作对象","at_ms":1700000000123},
+              {"kind":"loop_outcome","text":"loop settled: Completed (steps 6)","at_ms":1700000009999}
+            ]}
+        """.trimIndent()
+        val entries = LoopEventParser.parseConversation(json)
+        assertEquals(2, entries.size)
+        assertEquals("user_message", entries[0].kind)
+        assertEquals("继续以靶点为动作对象", entries[0].text)
+        assertEquals(1700000000123L, entries[0].atMs)
+        assertEquals("loop_outcome", entries[1].kind)
+        assertTrue(entries[1].text.contains("Completed"))
+    }
+
+    @Test
+    fun `会话投影失败态降级为空表`() {
+        // 会话未开启（ok=false）、字段缺失、非法 JSON：统一空表（调用方区分场景）。
+        assertTrue(LoopEventParser.parseConversation("""{"ok":false,"error":"x"}""").isEmpty())
+        assertTrue(LoopEventParser.parseConversation("""{"ok":true}""").isEmpty())
+        assertTrue(LoopEventParser.parseConversation("not json").isEmpty())
+        // 条目非对象跳过，不崩溃。
+        val one = LoopEventParser.parseConversation(
+            """{"ok":true,"entries":["junk",{"kind":"user_message","text":"t","at_ms":1}]}""",
+        )
+        assertEquals(1, one.size)
+    }
 }

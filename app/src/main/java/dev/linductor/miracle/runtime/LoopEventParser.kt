@@ -31,6 +31,13 @@ object LoopEventParser {
         val note: String,
     )
 
+    /** 干跑传输断言投影（scripted transport 记录的请求标记；P3h-05 取证）。 */
+    data class TransportStats(
+        val requests: Long,
+        val sawFollowup: Boolean,
+        val sawToolResult: Boolean,
+    )
+
     data class LoopResult(
         val outcome: String,
         val summary: String,
@@ -40,10 +47,20 @@ object LoopEventParser {
         val events: Long,
         val steps: List<LoopStep>,
         val miraVersion: String,
+        val transport: TransportStats?,
+        val userMessagesInjected: Long,
+        val toolEvents: Long,
     ) {
         val completed: Boolean get() = outcome == "Completed"
         val cancelled: Boolean get() = outcome == "Cancelled"
     }
+
+    /** DEC-016 会话对话条目（build_conversation_view 投影；P3h-04）。 */
+    data class ConversationEntry(
+        val kind: String, // "user_message" | "loop_outcome"
+        val text: String,
+        val atMs: Long,
+    )
 
     /** DEC-004 确认挑战（digest/nonce 绑定、单次有效、60s 到期）。 */
     data class ConfirmationData(
@@ -102,6 +119,16 @@ object LoopEventParser {
                 ),
             )
         }
+        val transportJson = payload.optJSONObject("transport")
+        val transport = if (transportJson != null) {
+            TransportStats(
+                requests = transportJson.optLong("requests"),
+                sawFollowup = transportJson.optBoolean("saw_followup"),
+                sawToolResult = transportJson.optBoolean("saw_tool_result"),
+            )
+        } else {
+            null
+        }
         return LoopResult(
             outcome = payload.optString("outcome", "Failed"),
             summary = payload.optString("summary"),
@@ -111,7 +138,38 @@ object LoopEventParser {
             events = payload.optLong("events"),
             steps = steps,
             miraVersion = payload.optString("mira_version"),
+            transport = transport,
+            userMessagesInjected = payload.optLong("user_messages_injected"),
+            toolEvents = payload.optLong("tool_events"),
         )
+    }
+
+    /**
+     * 解析 loopConversation 的投影 JSON（P3h-04）。失败返回空表（会话未开启等
+     * 非错误态由调用方经 ok 字段区分；此处对解析失败按空表降级）。
+     */
+    fun parseConversation(conversationJson: String): List<ConversationEntry> {
+        return try {
+            val root = org.json.JSONObject(conversationJson)
+            if (!root.optBoolean("ok")) {
+                return emptyList()
+            }
+            val entries = ArrayList<ConversationEntry>()
+            val array = root.optJSONArray("entries") ?: org.json.JSONArray()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                entries.add(
+                    ConversationEntry(
+                        kind = item.optString("kind"),
+                        text = item.optString("text"),
+                        atMs = item.optLong("at_ms"),
+                    ),
+                )
+            }
+            entries
+        } catch (_: org.json.JSONException) {
+            emptyList()
+        }
     }
 
     private fun parseConfirmation(payload: org.json.JSONObject): ConfirmationData {

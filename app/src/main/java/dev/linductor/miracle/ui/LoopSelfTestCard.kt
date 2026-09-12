@@ -176,6 +176,28 @@ fun LoopSelfTestCard(
                     Text("④ R3 确认")
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.runDryRun(context, "user_message") },
+                    enabled = dryRun !is LoopSelfTestViewModel.DryRunState.Running && projectionBound,
+                ) {
+                    Text("⑤ 指令注入")
+                }
+                OutlinedButton(
+                    onClick = { viewModel.runDryRun(context, "tool") },
+                    enabled = dryRun !is LoopSelfTestViewModel.DryRunState.Running && projectionBound,
+                ) {
+                    Text("⑥ wait 工具")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.runDryRun(context, "tool_budget") },
+                    enabled = dryRun !is LoopSelfTestViewModel.DryRunState.Running && projectionBound,
+                ) {
+                    Text("⑦ 工具预算耗尽")
+                }
+            }
             if (!projectionBound) {
                 OutlinedButton(onClick = onRequestProjection) {
                     Text("干跑需先授权屏幕采集（点击授权）")
